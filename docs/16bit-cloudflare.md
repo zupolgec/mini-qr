@@ -12,3 +12,7 @@
   `16bit 600` via `VITE_QR_CODE_PRESETS` + `VITE_DEFAULT_PRESET` (letto solo da
   `vite build`, non dal dev server). Nota: sostituisce la galleria dei preset
   built-in.
+- GitHub Actions sul fork: disabilitati a livello di repo (non cancellando i
+  file, per non confliggere con i merge da upstream) `crowdin-sync`,
+  `deepl-translate` e `Storybook Preview` — richiedono secret assenti sul fork
+  e mandavano mail di failure. Restano attivi `Tests` e `Docker`.
