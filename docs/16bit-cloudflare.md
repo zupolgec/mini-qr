@@ -17,3 +17,6 @@
   `deepl-translate` e `Storybook Preview` — richiedono secret assenti sul fork
   e mandavano mail di failure. Resta attivo solo `Tests` (`Docker` spento:
   sul fork non serve, il deploy è su Cloudflare Workers via wrangler).
+- HTTPS: regola redirect `qr http to https` sulla zona `16bit.cloud`
+  (solo host `qr.16bit.cloud`, http→301 https) — `always_use_https` di zona
+  resta spento per non impattare gli altri host.
