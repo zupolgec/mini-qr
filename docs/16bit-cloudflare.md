@@ -20,3 +20,5 @@
 - HTTPS: regola redirect `qr http to https` sulla zona `16bit.cloud`
   (solo host `qr.16bit.cloud`, http→301 https) — `always_use_https` di zona
   resta spento per non impattare gli altri host.
+- Solo custom domain: `workers_dev: false` in `wrangler.jsonc`, quindi
+  `qr.16bit.workers.dev` risponde 404 — resta solo `qr.16bit.cloud`.
