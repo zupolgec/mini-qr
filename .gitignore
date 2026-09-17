@@ -30,6 +30,7 @@ crowdin.yml
 dev-dist
 
 .env
+.dev.vars
 
 # Playwright
 test-results/

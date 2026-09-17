@@ -4,6 +4,7 @@ import MobileMenu from '@/components/MobileMenu.vue'
 import QRCodeScan from '@/components/QRCodeScan.vue'
 import QRCodeCreate from '@/components/QRCodeCreate.vue'
 import AppFooter from '@/components/AppFooter.vue'
+import { getPrefilledQrDataFromSearch } from '@/utils/appUrlParams'
 import useDarkModePreference from '@/utils/useDarkModePreference'
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -13,7 +14,14 @@ const { isDarkMode, isDarkModePreferenceSetBySystem, toggleDarkModePreference } 
   useDarkModePreference()
 
 const capturedData = ref<string>('')
+const initialCreateData = ref<string>('')
 const qrCodeScanRef = ref<InstanceType<typeof QRCodeScan> | null>(null)
+
+const syncInitialCreateDataFromUrl = () => {
+  if (typeof window === 'undefined') return
+
+  initialCreateData.value = getPrefilledQrDataFromSearch(window.location.search) ?? ''
+}
 
 // #region Scroll-aware header
 const lastScrollTop = ref(0)
@@ -37,11 +45,14 @@ const handleScroll = () => {
 }
 
 onMounted(() => {
+  syncInitialCreateDataFromUrl()
   document.querySelector('#app')?.addEventListener('scroll', handleScroll)
+  window.addEventListener('popstate', syncInitialCreateDataFromUrl)
 })
 
 onUnmounted(() => {
   document.querySelector('#app')?.removeEventListener('scroll', handleScroll)
+  window.removeEventListener('popstate', syncInitialCreateDataFromUrl)
 })
 // #endregion
 
@@ -72,6 +83,8 @@ const useCapturedDataInCreateMode = (data: string) => {
 const isModeToggleDisabled = computed(() => {
   return appMode.value === AppMode.Scan && !!qrCodeScanRef.value && !!qrCodeScanRef.value.isLoading
 })
+
+const initialQRCodeCreateData = computed(() => capturedData.value || initialCreateData.value)
 // #endregion
 </script>
 
@@ -277,7 +290,7 @@ const isModeToggleDisabled = computed(() => {
       <!-- Main content area with conditional rendering based on app mode -->
       <div class="w-full lg:w-5/6">
         <div v-if="appMode === AppMode.Create">
-          <QRCodeCreate :initial-data="capturedData" />
+          <QRCodeCreate :initial-data="initialQRCodeCreateData" />
         </div>
         <div v-else class="flex flex-col items-center justify-center py-8">
           <QRCodeScan ref="qrCodeScanRef" @create-qr="useCapturedDataInCreateMode" />
