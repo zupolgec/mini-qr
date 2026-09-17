@@ -15,4 +15,5 @@
 - GitHub Actions sul fork: disabilitati a livello di repo (non cancellando i
   file, per non confliggere con i merge da upstream) `crowdin-sync`,
   `deepl-translate` e `Storybook Preview` — richiedono secret assenti sul fork
-  e mandavano mail di failure. Restano attivi `Tests` e `Docker`.
+  e mandavano mail di failure. Resta attivo solo `Tests` (`Docker` spento:
+  sul fork non serve, il deploy è su Cloudflare Workers via wrangler).
