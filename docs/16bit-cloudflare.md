@@ -8,3 +8,7 @@
   endpoint `/api/render.*`).
 - Base code: `upstream/main` (`lyqht/mini-qr`, tag `v0.33.0`, package `0.30.2` —
   versione ferma perché upstream è passato a release manuale).
+- Default 600×600: `.env.production` definisce un unico preset neutro
+  `16bit 600` via `VITE_QR_CODE_PRESETS` + `VITE_DEFAULT_PRESET` (letto solo da
+  `vite build`, non dal dev server). Nota: sostituisce la galleria dei preset
+  built-in.
