@@ -21,26 +21,30 @@ An app to create beautiful QR codes and scan various QR code types.
 
 - ✅ Accessible: minimally WCAG A compliant
 - 🎨 Customizable colors and styles
-- 🖼️ Export to PNG, JPG & SVG\*
+- 🖼️ Export to PNG, JPG & SVG
+- 🔤 Export to ASCII / Unicode text
 - 📋 Copy to clipboard
 - 🌓 Light/dark/system-preference mode toggle
 - 🎲 Randomize style button
 - 🌐 Available in 30+ languages
 - 💾 Save & Load QR Code config
-- 🖼️ Upload custom image for logo
+- 🖼️ Upload custom image for logo with adjustable size and margin
 - 🎭 Presets: Pre-crafted QR code styles
-- 🖌️ Frame customization: Add text labels and style the frame around your QR code
+- 🖌️ Frame customization: Add a frame containing text and a background around your QR code.
 - 🛡️ Error correction level: affects the size of the QR code and logo within. Use lower correction levels for bigger pieces of data to ensure that it can be read.
 - 📱 QR Code Scanner: Scan QR codes using your camera or by uploading images, with intelligent detection for URLs, emails, phone numbers, WiFi credentials, and more
-- 📦 Batch data export: Import a CSV file with multiple data strings and export QR codes for them all at once.
+- 📦 Batch data export: Import a CSV file with multiple data strings and export QR codes for them all at once. Template CSV files can be found in [`public/batch_export_templates/`](public/batch_export_templates/).
 - 📲 PWA Support: Install MiniQR as a desktop or mobile app
-- 📝 Data templates: Support for various data types including text, URLs, emails, phone numbers, SMS, WiFi credentials, vCards, locations, and calendar events
+- 📝 Data templates: Support for various data types including text, URLs, emails, phone numbers, SMS, WiFi credentials, vCards, locations, calendar events, and EPC QR (SEPA payment / GiroCode)
+- 🌍 UTF-8 input support: Vietnamese, CJK, Arabic, emoji, and other multibyte text
 
-\*SVG export has limited support and may not display correctly in all software. For more information, please refer to [CONTRIBUTING.md](CONTRIBUTING.md).
+See [ROADMAP.md](./ROADMAP.md) for future planned features.
 
 ## Demo
 
 Try it out [here](https://mini-qr-code-generator.vercel.app/) ✨
+
+Browse the component library (the internal QR-code rendering lib) in Storybook at [mini-qr-storybook.vercel.app](https://mini-qr-storybook.vercel.app) 📚
 
 <details>
 
@@ -88,98 +92,7 @@ https://github.com/lyqht/mini-qr/assets/35736525/991b2d7e-f168-4354-9091-1678d2c
 
 ## Self-hosting
 
-### Self-hosting with Docker 🐋
-
-Mini-QR can easily be self-hosted using Docker. We provide a [docker-compose.yml](docker-compose.yml) file and a production-ready multi-stage [Dockerfile](Dockerfile).
-
-Quick Start (using prebuilt image)
-
-```bash
-wget https://github.com/lyqht/mini-qr/raw/main/docker-compose.yml
-
-docker compose up -d
-```
-
-This will pull the latest production image from GitHub Container Registry and start the app at [http://localhost:8081](http://localhost:8081).
-
-To build and run locally (for development or custom builds)
-
-```bash
-docker compose up -d --build
-```
-
-Or build and run manually:
-
-```bash
-docker build -t mini-qr .
-docker run -d -p 8081:8080 mini-qr
-```
-
-### Self-hosting without Docker 🌐
-
-You can also simply compile the application directly using NPM and Vite like follows:
-
-```bash
-git clone https://github.com/lyqht/mini-qr.git
-cd mini-qr
-npm install
-npm run build
-```
-
-From there, the application will be build into `dist` folder and this folder can simply be hosted from any kind of web server.
-
-An example using PHP's built-in web server:
-
-```bash
-cd dist
-php -S localhost:8080
-```
-
-### Customization
-
-An example of a self-hosted website with a modified MiniQR app with specific language and preset: https://qrcode.outils.restosducoeur.org/
-
-#### Environment Variables
-
-| Variable                      | Description                                                                        | Default   |
-| ----------------------------- | ---------------------------------------------------------------------------------- | --------- |
-| `BASE_PATH`                   | Base path for deployment                                                           | `/`       |
-| `VITE_HIDE_CREDITS`           | Set to `"true"` to hide credits in the footer                                      | `"false"` |
-| `VITE_DEFAULT_PRESET`         | Name of the default QR code preset to load (e.g., `"lyqht"`)                       | `""`      |
-| `VITE_DEFAULT_DATA_TO_ENCODE` | Default data to encode when the app first loads                                    | `""`      |
-| `VITE_QR_CODE_PRESETS`        | JSON string defining custom QR code presets. E.g., `'[{"name":"c1","data":"hi"}]'` | `"[]"`    |
-| `VITE_FRAME_PRESET`           | Name of the default frame preset to load (e.g., `"default"`)                       | `""`      |
-| `VITE_FRAME_PRESETS`          | JSON string defining custom frame presets. E.g., `'[{"name":"fA","text":"QR"}]'`   | `"[]"`    |
-| `VITE_DISABLE_LOCAL_STORAGE`  | Set to `"true"` to disable loading saved settings from local storage on startup    | `"false"` |
-
-### Docker configuration
-
-- You can edit `nginx.conf` or mount your own static files by uncommenting the `volumes` section in `docker-compose.yml`.
-- The production image uses Nginx for optimal static file serving.
-- The `.dockerignore` file is included for smaller, faster builds.
-- Set `BASE_PATH=/your-path` to deploy the app under a subdirectory (e.g., for hosting at `domain.com/your-path`).
-- If you want to have a default preset to be fixed, you should set `VITE_DISABLE_LOCAL_STORAGE=true`
-
-#### Examples
-
-Deploy at root path (default):
-
-```bash
-docker compose up -d
-```
-
-Deploy at subdirectory `/mini-qr`:
-
-```bash
-BASE_PATH=/mini-qr docker compose up -d
-```
-
-For custom builds with specific BASE_PATH:
-
-```bash
-docker build --build-arg BASE_PATH=/mini-qr -t mini-qr .
-docker run -d -p 8081:8080 mini-qr
-```
+For full self-hosting instructions including Docker setup, environment variables, custom presets, and deployment scenarios, see [SELF_HOSTING.md](SELF_HOSTING.md).
 
 ## Contributing
 
@@ -187,6 +100,8 @@ docker run -d -p 8081:8080 mini-qr
 
 Translations & bug fixes are welcome!
 For all other matters, before opening an issue or contacting the project maintainer, please read up on to [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Component stories live in Storybook (`pnpm storybook` locally, or the production build at [mini-qr-storybook.vercel.app](https://mini-qr-storybook.vercel.app)). Pull requests that touch the UI get an auto-deployed Storybook preview on Vercel — see [docs/storybook-vercel-previews.md](docs/storybook-vercel-previews.md) for how it's wired up.
 
 ---
 
@@ -224,6 +139,9 @@ Thank you for everyone here for taking their time out to improve MiniQR 🧡
     <tr>
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/Kolophonium0"><img src="https://avatars.githubusercontent.com/u/24278823?v=4?s=48" width="48px;" alt="Yannik Herbst"/><br /><sub><b>Yannik Herbst</b></sub></a><br /><a href="#question-Kolophonium0" title="Answering Questions">💬</a></td>
       <td align="center" valign="top" width="16.66%"><a href="http://solovjov.net/"><img src="https://avatars.githubusercontent.com/u/11983427?v=4?s=48" width="48px;" alt="Mikhail Solovev"/><br /><sub><b>Mikhail Solovev</b></sub></a><br /><a href="#translation-r3bers" title="Translation">🌍</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/osamajvd"><img src="https://avatars.githubusercontent.com/u/54687462?v=4?s=48" width="48px;" alt="osamajvd"/><br /><sub><b>osamajvd</b></sub></a><br /><a href="https://github.com/lyqht/mini-qr/commits?author=osamajvd" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/aleex1848"><img src="https://avatars.githubusercontent.com/u/17452861?v=4?s=48" width="48px;" alt="aleex1848"/><br /><sub><b>aleex1848</b></sub></a><br /><a href="https://github.com/lyqht/mini-qr/commits?author=aleex1848" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/jdiepholz"><img src="https://avatars.githubusercontent.com/u/144233651?v=4?s=48" width="48px;" alt="jdiepholz"/><br /><sub><b>jdiepholz</b></sub></a><br /><a href="https://github.com/lyqht/mini-qr/commits?author=jdiepholz" title="Code">💻</a></td>
     </tr>
   </tbody>
   <tfoot>

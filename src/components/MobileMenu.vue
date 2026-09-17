@@ -5,6 +5,8 @@ import LanguageSelector from '@/components/LanguageSelector.vue'
 import { useI18n } from 'vue-i18n'
 import { marked } from 'marked'
 import { fetchWithBasePath } from '@/utils/basePath'
+import { useChangelogNotice } from '@/utils/useChangelogNotice'
+import { getDisplayVersion } from '@/utils/changelogVersion'
 import {
   Dialog,
   DialogContent,
@@ -14,7 +16,7 @@ import {
   DialogTrigger,
   DialogClose
 } from '@/components/ui/dialog'
-import { X } from 'lucide-vue-next'
+import { X } from '@lucide/vue'
 
 defineProps<{
   isDarkMode: boolean
@@ -27,6 +29,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const { hasUnseenChangelog, markAsSeen } = useChangelogNotice()
 const isOpen = ref(false)
 const reference = ref<HTMLElement | null>(null)
 const floating = ref<HTMLElement | null>(null)
@@ -46,12 +49,7 @@ async function fetchAndProcessChangelog() {
       }
       const markdown = await response.text()
 
-      const versionMatch = markdown.match(/^##\s+(v\d+\.\d+\.\d+)/m)
-      if (versionMatch && versionMatch[1]) {
-        version.value = versionMatch[1]
-      } else {
-        version.value = 'N/A'
-      }
+      version.value = getDisplayVersion(markdown, import.meta.env.VITE_APP_VERSION)
 
       changelogContent.value = await marked.parse(markdown)
     } catch (error) {
@@ -130,8 +128,14 @@ onUnmounted(() => {
             class="secondary-button absolute end-4 top-4"
             :aria-label="t('View changelog')"
             :disabled="isLoadingChangelog"
+            @click="markAsSeen"
           >
             {{ isLoadingChangelog ? '...' : version }}
+            <span
+              v-if="hasUnseenChangelog"
+              class="absolute -right-1 -top-1 block size-2.5 rounded-full bg-[#abcbca] ring-2 ring-white dark:ring-zinc-800"
+              aria-hidden="true"
+            ></span>
           </button>
         </DialogTrigger>
 
@@ -166,22 +170,6 @@ onUnmounted(() => {
         <div class="flex items-center">
           <h1 class="text-xl text-gray-700 dark:text-gray-100">MiniQR</h1>
         </div>
-
-        <!-- GitHub link -->
-        <a
-          class="flex items-center gap-2 rounded-md px-2 py-1.5 text-zinc-800 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-700"
-          href="https://github.com/lyqht/mini-qr"
-          target="_blank"
-          :aria-label="t('GitHub repository for this project')"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24">
-            <path
-              fill="currentColor"
-              d="M12.001 2c-5.525 0-10 4.475-10 10a9.994 9.994 0 0 0 6.837 9.488c.5.087.688-.213.688-.476c0-.237-.013-1.024-.013-1.862c-2.512.463-3.162-.612-3.362-1.175c-.113-.288-.6-1.175-1.025-1.413c-.35-.187-.85-.65-.013-.662c.788-.013 1.35.725 1.538 1.025c.9 1.512 2.337 1.087 2.912.825c.088-.65.35-1.087.638-1.337c-2.225-.25-4.55-1.113-4.55-4.938c0-1.088.387-1.987 1.025-2.688c-.1-.25-.45-1.275.1-2.65c0 0 .837-.262 2.75 1.026a9.28 9.28 0 0 1 2.5-.338c.85 0 1.7.112 2.5.337c1.913-1.3 2.75-1.024 2.75-1.024c.55 1.375.2 2.4.1 2.65c.637.7 1.025 1.587 1.025 2.687c0 3.838-2.337 4.688-4.563 4.938c.363.312.676.912.676 1.85c0 1.337-.013 2.412-.013 2.75c0 .262.188.574.688.474A10.016 10.016 0 0 0 22 12c0-5.525-4.475-10-10-10Z"
-            />
-          </svg>
-          <span>GitHub</span>
-        </a>
 
         <!-- Dark mode toggle -->
         <button
@@ -242,6 +230,74 @@ onUnmounted(() => {
           <LanguageSelector />
         </div>
 
+        <hr class="border-zinc-200 dark:border-zinc-700" />
+
+        <!-- General feedback / questions / ideas → GitHub Discussions. -->
+        <a
+          class="flex items-center gap-2 rounded-md px-2 py-1.5 text-zinc-800 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-700"
+          href="https://github.com/lyqht/mini-qr/discussions"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+          </svg>
+          <span>{{ t('Feedback') }}</span>
+        </a>
+
+        <!-- Concrete bugs → structured issue form. -->
+        <a
+          class="flex items-center gap-2 rounded-md px-2 py-1.5 text-zinc-800 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-700"
+          href="https://github.com/lyqht/mini-qr/issues/new?template=qr-lib-bug.yml"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+          <span>{{ t('Report an issue') }}</span>
+        </a>
+
+        <!-- GitHub repo -->
+        <a
+          class="flex items-center gap-2 rounded-md px-2 py-1.5 text-zinc-800 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-700"
+          href="https://github.com/lyqht/mini-qr"
+          target="_blank"
+          :aria-label="t('GitHub repository for this project')"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24">
+            <path
+              fill="currentColor"
+              d="M12.001 2c-5.525 0-10 4.475-10 10a9.994 9.994 0 0 0 6.837 9.488c.5.087.688-.213.688-.476c0-.237-.013-1.024-.013-1.862c-2.512.463-3.162-.612-3.362-1.175c-.113-.288-.6-1.175-1.025-1.413c-.35-.187-.85-.65-.013-.662c.788-.013 1.35.725 1.538 1.025c.9 1.512 2.337 1.087 2.912.825c.088-.65.35-1.087.638-1.337c-2.225-.25-4.55-1.113-4.55-4.938c0-1.088.387-1.987 1.025-2.688c-.1-.25-.45-1.275.1-2.65c0 0 .837-.262 2.75 1.026a9.28 9.28 0 0 1 2.5-.338c.85 0 1.7.112 2.5.337c1.913-1.3 2.75-1.024 2.75-1.024c.55 1.375.2 2.4.1 2.65c.637.7 1.025 1.587 1.025 2.687c0 3.838-2.337 4.688-4.563 4.938c.363.312.676.912.676 1.85c0 1.337-.013 2.412-.013 2.75c0 .262.188.574.688.474A10.016 10.016 0 0 0 22 12c0-5.525-4.475-10-10-10Z"
+            />
+          </svg>
+          <span>GitHub</span>
+        </a>
+
         <!-- Divider -->
         <hr class="border-zinc-200 dark:border-zinc-700 md:hidden" />
 
@@ -262,7 +318,7 @@ onUnmounted(() => {
               >
             </span>
             <a
-              href="https://blog.esteetey.dev/sponsor"
+              href="https://github.com/sponsors/lyqht?frequency=one-time&sponsor=lyqht"
               target="_blank"
               class="secondary-button"
               :aria-label="t('Sponsor')"

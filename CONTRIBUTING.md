@@ -41,16 +41,6 @@ Before you start, please take a moment to read through these guidelines.
   - Include mockups if the change is UI-based.
   - For self-hosting related feature requests, please note that I, the main project maintainer (@lyqht) will likely not work on those. This is because I do not have docker expertise and I don't really have an interest to learn it. The current docker images are setup by kind public contributors. Thanks for your understanding!
 
-### Reporting Bugs
-
-![Screenshot of how MiniQR is a very big wrapper around qr-code-styling library](public/miniqr_extract.png)
-
-- Please note that the following issues are known and are caused by the `qr-code-styling` library, and cannot be fixed within this project.
-  - Encoding issues with accented characters
-  - Image margin inconsistency
-  - SVG export not containing actual svg paths, causing black images on certain software like Adobe Photoshop. -> Due to its unreliability, I've tried removing this export option sometime ago but many users requested to have it back since they don't use the SVG file for editing, and merely for displaying it on the web. So please stop requesting this to be removed/fixed.
-- For all other bugs, provide clear steps for reproduction.
-
 ## Development environment
 
 ### Getting started with local development
@@ -106,6 +96,7 @@ The project is a modern Vite-powered Vue.js 3 application with TypeScript suppor
 **Library utilities (`src/lib/`):**
 
 - `utils.ts`: Shared utility functions
+- `qr-code/`: The internal QR rendering library (see [the architecture section below](#internal-qr-library-architecture) for the build-vs-vendor split). Public entry: `src/lib/qr-code/index.ts`.
 
 **Styles:**
 
@@ -157,6 +148,40 @@ The project is a modern Vite-powered Vue.js 3 application with TypeScript suppor
 - The project uses TypeScript throughout for better type safety
 - UI components in `src/components/ui/` are auto-generated from radix-vue and should not be modified manually
 - The application supports both light and dark themes with system preference detection
+
+## Internal QR library: architecture
+
+`src/lib/qr-code/` is split deliberately between code we own and a single small vendored dependency. Two questions come up often — answered here so PR reviews don't relitigate them.
+
+### "Are we generating the QR matrix ourselves?"
+
+**No — we delegate that to [`qrcode-generator`](https://github.com/kazuhikoarase/qrcode-generator) (MIT, ~10 KB gzipped).** It owns everything QR-spec-compliance-heavy:
+
+- Reed–Solomon error correction (GF(2⁸) arithmetic, generator polynomials per L/M/Q/H level)
+- BCH coding of format-info and version-info bits
+- One of 8 mask patterns selected per the spec's penalty score
+- Finder, timing, and alignment patterns positioned per the spec for every QR version 1–40
+- Capacity tables for the four data modes (Numeric, Alphanumeric, Byte, Kanji)
+
+Inside [`src/lib/qr-code/matrix.ts`](src/lib/qr-code/matrix.ts) the call into the library is three lines: build a QR, add the bytes, ask for `isDark(r, c)` per module. The only thing we override is `qrcode.stringToBytes` so it uses `TextEncoder` (proper UTF-8) instead of the library's Latin-1 default — that override is what fixes [#119](https://github.com/lyqht/mini-qr/issues/119).
+
+### "Why not implement the matrix ourselves and drop the dep?"
+
+Re-implementing the bullet list above is roughly 2 000 LOC of QR-spec code: GF(2⁸) tables and arithmetic, BCH coding, mask penalty scoring, version-info encoding, and capacity tables for 40 × 4 × 4 combinations. The maintenance + correctness risk is large and the bundle savings would be negligible — the spec tables are most of the dependency's size and we'd have to ship them either way. `qrcode-generator` is also a decade-old, well-tested MIT library, so the supply-chain risk is small. **Bottom line: keep the dep**; it has exactly one entry point, it's MIT, and the value-per-LOC of re-implementing is near zero.
+
+We would only re-implement if we needed features the library doesn't expose — for example, structured-append (splitting one payload across multiple QR codes), micro-QR, or custom data-encoding modes. None of those are currently on the roadmap.
+
+### What we _do_ own
+
+Everything _after_ the matrix:
+
+- [`render/svg.ts`](src/lib/qr-code/render/svg.ts), [`render/dots.ts`](src/lib/qr-code/render/dots.ts), [`render/corners.ts`](src/lib/qr-code/render/corners.ts), [`render/neighbors.ts`](src/lib/qr-code/render/neighbors.ts), [`render/image.ts`](src/lib/qr-code/render/image.ts) — emit one aggregated `<path>` per element class. This is what makes the SVG export real vector instead of a base64 raster.
+- [`render/canvas.ts`](src/lib/qr-code/render/canvas.ts) — rasterises the generated SVG to PNG / JPG via `<canvas>`.
+- [`frame.ts`](src/lib/qr-code/frame.ts) — composes a frame (border + caption) around the QR.
+- [`legacy-adapter.ts`](src/lib/qr-code/legacy-adapter.ts) + [`legacy-types.ts`](src/lib/qr-code/legacy-types.ts) — drop-in for the old `qr-code-styling` types so the preset JSON shape and saved-config storage format stay byte-stable.
+- [`svg-export.ts`](src/lib/qr-code/svg-export.ts) — assembles the structured-state SVG used by every export path (PNG, JPG, SVG, clipboard).
+
+Storybook examples for each unit live in [`src/lib/qr-code/stories/`](src/lib/qr-code/stories/) — `pnpm storybook` to browse.
 
 ## End-to-End (E2E) Testing
 

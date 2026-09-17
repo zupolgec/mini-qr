@@ -91,9 +91,7 @@ const initialQRCodeCreateData = computed(() => capturedData.value || initialCrea
 <template>
   <main>
     <!-- Desktop header - only visible on desktop -->
-    <div
-      class="hidden md:mx-auto md:mb-4 md:mt-8 md:flex md:w-5/6 md:flex-row md:justify-between md:ps-4"
-    >
+    <div class="hidden md:mx-auto md:my-4 md:flex md:w-5/6 md:flex-row md:justify-between md:ps-4">
       <div class="flex items-center">
         <h1 class="text-3xl text-gray-700 dark:text-gray-100">MiniQR</h1>
 
@@ -143,19 +141,6 @@ const initialQRCodeCreateData = computed(() => capturedData.value || initialCrea
       </div>
 
       <div class="flex items-center justify-end gap-2">
-        <a
-          class="icon-button"
-          href="https://github.com/lyqht/mini-qr"
-          target="_blank"
-          :aria-label="t('GitHub repository for this project')"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24">
-            <path
-              fill="#abcbca"
-              d="M12.001 2c-5.525 0-10 4.475-10 10a9.994 9.994 0 0 0 6.837 9.488c.5.087.688-.213.688-.476c0-.237-.013-1.024-.013-1.862c-2.512.463-3.162-.612-3.362-1.175c-.113-.288-.6-1.175-1.025-1.413c-.35-.187-.85-.65-.013-.662c.788-.013 1.35.725 1.538 1.025c.9 1.512 2.337 1.087 2.912.825c.088-.65.35-1.087.638-1.337c-2.225-.25-4.55-1.113-4.55-4.938c0-1.088.387-1.987 1.025-2.688c-.1-.25-.45-1.275.1-2.65c0 0 .837-.262 2.75 1.026a9.28 9.28 0 0 1 2.5-.338c.85 0 1.7.112 2.5.337c1.913-1.3 2.75-1.024 2.75-1.024c.55 1.375.2 2.4.1 2.65c.637.7 1.025 1.587 1.025 2.687c0 3.838-2.337 4.688-4.563 4.938c.363.312.676.912.676 1.85c0 1.337-.013 2.412-.013 2.75c0 .262.188.574.688.474A10.016 10.016 0 0 0 22 12c0-5.525-4.475-10-10-10Z"
-            />
-          </svg>
-        </a>
         <button
           class="icon-button"
           @click="toggleDarkModePreference"
@@ -285,7 +270,7 @@ const initialQRCodeCreateData = computed(() => capturedData.value || initialCrea
     </div>
 
     <div
-      class="relative grid min-h-screen place-items-center items-start bg-white p-8 pt-16 dark:bg-zinc-900 md:px-6 md:pt-8"
+      class="relative grid min-h-screen place-items-center items-start bg-white p-8 pt-16 dark:bg-zinc-900 md:px-6 md:pb-6 md:pt-4"
     >
       <!-- Main content area with conditional rendering based on app mode -->
       <div class="w-full lg:w-5/6">
@@ -303,20 +288,20 @@ const initialQRCodeCreateData = computed(() => capturedData.value || initialCrea
 
 <style lang="postcss" scoped>
 .vertical-border {
-  @apply h-8 bg-slate-300 dark:bg-slate-700 w-1;
+  @apply h-8 w-1 bg-slate-300 dark:bg-slate-700;
 }
 
 .icon-button {
   @apply p-1;
-  @apply outline-none focus-visible:ring-1 focus-visible:ring-zinc-700 dark:focus-visible:ring-zinc-200 hover:shadow rounded-sm;
-  @apply text-zinc-900 dark:text-zinc-100 dark:bg-zinc-800;
+  @apply rounded-sm outline-none hover:shadow focus-visible:ring-1 focus-visible:ring-zinc-700 dark:focus-visible:ring-zinc-200;
+  @apply text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100;
 }
 
 .button {
-  @apply bg-zinc-100 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-200;
-  @apply shadow-sm hover:shadow p-2 focus-visible:shadow-md rounded-lg;
+  @apply bg-zinc-100 text-zinc-900 dark:bg-zinc-700 dark:text-zinc-200;
+  @apply rounded-lg p-2 shadow-sm hover:shadow focus-visible:shadow-md;
   @apply outline-none focus-visible:ring-1 focus-visible:ring-zinc-700 dark:focus-visible:ring-zinc-200;
-  @apply disabled:opacity-50 disabled:cursor-not-allowed;
+  @apply disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 /* Scroll-aware header styles */

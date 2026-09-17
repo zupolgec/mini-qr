@@ -11,6 +11,8 @@ import {
   AccordionTrigger
 } from '@/components/ui/accordion'
 import { Combobox } from '@/components/ui/Combobox'
+import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
+import QRSimpleFieldsCustomizer from '@/components/QRSimpleFieldsCustomizer.vue'
 import {
   Drawer,
   DrawerContent,
@@ -26,36 +28,69 @@ import {
   downloadJpgElement,
   downloadPngElement,
   downloadSvgElement,
+  getInlinedSvgString,
   getJpgElement,
-  getPngElement,
-  getSvgString
+  getPngElement
 } from '@/utils/convertToImage'
+import { downloadBlob } from '@/utils/download'
 import { parseCSV, validateCSVData, type CSVParsingResult } from '@/utils/csv'
 import { generateBatchExportFilename, processCsvDataForBatch } from '@/utils/csvBatchProcessing'
 import { getNumericCSSValue } from '@/utils/formatting'
-import { allFramePresets, defaultFramePreset, type FramePreset } from '@/utils/framePresets'
-import { allQrCodePresets, defaultPreset, type Preset } from '@/utils/qrCodePresets'
+import FitScaleBox from '@/components/FitScaleBox.vue'
+import {
+  allFramePresets,
+  defaultFramePreset,
+  FONT_OPTIONS,
+  loadGoogleFont,
+  type FontCategory,
+  type FontOption,
+  type FramePreset,
+  type FrameStyle
+} from '@/utils/framePresets'
+import {
+  allQrCodePresets,
+  defaultPreset,
+  isValidQRCodeConfig,
+  type Preset
+} from '@/utils/qrCodePresets'
+import {
+  CUSTOM_LOADED_PRESET_KEYS,
+  hasStoredQRConfig,
+  isLocalStorageEnabled,
+  LAST_LOADED_LOCALLY_PRESET_KEY,
+  LOADED_FROM_FILE_PRESET_KEY,
+  loadQRConfig,
+  loadSimpleFields,
+  loadViewMode,
+  saveQRConfig,
+  saveSimpleFields,
+  saveViewMode,
+  serializeQRConfig,
+  type QRCodeConfig,
+  type QRCodeFrameConfig
+} from '@/utils/useQRCodeStorage'
+import {
+  FRAME_FIELD_KEYS,
+  isFieldVisibleInMode,
+  parseVisibleFields,
+  hasFrameField,
+  type QRViewMode,
+  type SimpleFieldKey
+} from '@/utils/simpleModeFields'
 import { useMediaQuery } from '@vueuse/core'
 import JSZip from 'jszip'
+import TextExportModal from '@/components/TextExportModal.vue'
 import {
+  buildMatrix,
   type CornerDotType,
   type CornerSquareType,
   type DotType,
   type ErrorCorrectionLevel,
   type Options as StyledQRCodeProps
-} from 'qr-code-styling'
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+} from '@/lib/qr-code'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import 'vue-i18n'
 import { useI18n } from 'vue-i18n'
-
-interface FrameStyle {
-  textColor: string
-  backgroundColor: string
-  borderColor: string
-  borderWidth: string
-  borderRadius: string
-  padding: string
-}
 
 const props = defineProps<{
   initialData?: string
@@ -66,6 +101,126 @@ const isLarge = useMediaQuery('(min-width: 768px)')
 const isLikelyMobileDevice = computed(() => {
   return typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0
 })
+
+//#region /** Simple Mode */
+// Full mode shows every setting (current behavior). Simple mode shows only the
+// data field plus whichever fields the user pins via the customize panel. Both
+// the mode and the pinned-field list persist to localStorage so a refresh
+// returns the user to the same view (see onMounted + watchers below).
+
+// Deployment config (build-time env vars):
+// - VITE_QR_CREATE_SIMPLE_FULL_MODE_TOGGLE: when "true", show the Simple/Full
+//   toggle and the Customize fields button. Hidden by default so self-hosted
+//   deployments are not exposed to the controls unless opted in.
+// - VITE_FIELDS_VISIBLE: comma/space separated field keys. When set, the app
+//   starts in Simple mode showing only those fields (a fixed, simplified view).
+const showModeControls = import.meta.env.VITE_QR_CREATE_SIMPLE_FULL_MODE_TOGGLE === 'true'
+const configuredVisibleFields = parseVisibleFields(import.meta.env.VITE_FIELDS_VISIBLE)
+const hasConfiguredVisibleFields = configuredVisibleFields.length > 0
+
+const viewMode = ref<QRViewMode>(hasConfiguredVisibleFields ? 'simple' : 'full')
+const simpleFields = ref<SimpleFieldKey[]>(
+  hasConfiguredVisibleFields ? [...configuredVisibleFields] : []
+)
+const isCustomizeFieldsOpen = ref(false)
+const isSimpleMode = computed(() => viewMode.value === 'simple')
+
+// Controls which accordion sections are expanded. Both modes show the section
+// headers. We keep hidden sections OUT of the open set: otherwise a section
+// that is display:none but "open" would reveal and play its collapse animation
+// at the same time when switching simple → full, causing a visible flash.
+const openAccordionItems = ref<string[]>(['qr-code-settings'])
+
+function isFieldVisible(key: SimpleFieldKey): boolean {
+  return isFieldVisibleInMode(viewMode.value, simpleFields.value, key)
+}
+
+/** Whether an accordion group should render at all in the current mode. */
+function isGroupVisible(keys: readonly SimpleFieldKey[]): boolean {
+  return viewMode.value === 'full' || keys.some((k) => simpleFields.value.includes(k))
+}
+
+// The frame accordion section appears in simple mode when at least one frame
+// field is pinned, or when the frame is enabled (so it stays manageable).
+const isFrameSectionVisible = computed(() => isGroupVisible(FRAME_FIELD_KEYS) || showFrame.value)
+
+// Auto-open the frame section in simple mode once it becomes visible, and drop
+// it from the open set whenever it is hidden. (Not immediate — showFrame is
+// declared later, and the initial full-mode default is already correct.)
+watch(isFrameSectionVisible, (visible) => {
+  if (!visible) {
+    openAccordionItems.value = openAccordionItems.value.filter((i) => i !== 'frame-settings')
+  } else if (isSimpleMode.value && !openAccordionItems.value.includes('frame-settings')) {
+    openAccordionItems.value = ['frame-settings', ...openAccordionItems.value]
+  }
+})
+
+watch(isSimpleMode, (simple) => {
+  if (simple) {
+    // Open only the sections that are actually visible.
+    openAccordionItems.value = isFrameSectionVisible.value
+      ? ['frame-settings', 'qr-code-settings']
+      : ['qr-code-settings']
+  } else if (!openAccordionItems.value.includes('qr-code-settings')) {
+    // Entering full mode keeps whatever was open (no collapse flash); just
+    // ensure the QR section stays available.
+    openAccordionItems.value = [...openAccordionItems.value, 'qr-code-settings']
+  }
+})
+
+function setViewMode(mode: QRViewMode): void {
+  if (mode !== viewMode.value) triggerModeAnimation()
+  viewMode.value = mode
+}
+
+// On mobile the export/preview lives in a fixed bottom sheet that overlaps the
+// scrollable settings. Track its height so we can pad the bottom of the
+// settings column and let its last items scroll clear of the sheet.
+// Default reflects a typical sheet height so the padding is correct on the very
+// first render (avoids needing a second scroll); the observer then refines it.
+const DEFAULT_EXPORT_SHEET_HEIGHT = 220
+const exportSheetHeight = ref(DEFAULT_EXPORT_SHEET_HEIGHT)
+let exportSheetObserver: ResizeObserver | undefined
+function observeExportSheet(attempt = 0): void {
+  if (typeof ResizeObserver === 'undefined') return
+  exportSheetObserver?.disconnect()
+  const el = document.getElementById('drawer-preview-container')
+  if (!el) {
+    // The bottom sheet (vaul drawer trigger) can mount a tick after us; retry
+    // briefly while we're on a mobile layout.
+    if (!isLarge.value && attempt < 8) setTimeout(() => observeExportSheet(attempt + 1), 100)
+    return
+  }
+  exportSheetObserver = new ResizeObserver(() => {
+    const h = el.getBoundingClientRect().height
+    if (h > 0) exportSheetHeight.value = h
+  })
+  exportSheetObserver.observe(el)
+  const h = el.getBoundingClientRect().height
+  if (h > 0) exportSheetHeight.value = h
+}
+// The bottom sheet only exists on mobile; re-attach when the layout switches.
+watch(isLarge, () => nextTick(() => observeExportSheet()))
+onMounted(() => nextTick(() => observeExportSheet()))
+onUnmounted(() => exportSheetObserver?.disconnect())
+
+// Extra bottom padding (mobile only) so settings can scroll above the sheet.
+const settingsBottomPadding = computed(() =>
+  isLarge.value ? undefined : `${Math.round(exportSheetHeight.value) + 24}px`
+)
+
+// Briefly flag the settings container so visible `.field-reveal` blocks play
+// their slide-in animation when the user switches modes.
+const isModeAnimating = ref(false)
+let modeAnimationTimer: ReturnType<typeof setTimeout> | undefined
+function triggerModeAnimation(): void {
+  isModeAnimating.value = true
+  clearTimeout(modeAnimationTimer)
+  modeAnimationTimer = setTimeout(() => {
+    isModeAnimating.value = false
+  }, 300)
+}
+//#endregion
 
 //#region /** locale */
 const { t, locale } = useI18n()
@@ -93,7 +248,9 @@ const image = ref()
 const width = ref()
 const height = ref()
 const margin = ref()
+const showMarginHint = ref(false)
 const imageMargin = ref()
+const imageSize = ref<number | undefined>()
 
 watch(
   () => props.initialData,
@@ -112,6 +269,9 @@ const cornersDotOptionsColor = ref()
 const cornersDotOptionsType = ref()
 const styleBorderRadius = ref()
 const styledBorderRadiusFormatted = computed(() => `${styleBorderRadius.value}px`)
+const exportBorderRadius = computed(() =>
+  showFrame.value ? frameStyle.value.borderRadius : styledBorderRadiusFormatted.value
+)
 const styleBackground = ref(defaultPreset.style.background)
 const lastBackground = ref(defaultPreset.style.background)
 const includeBackground = ref(true)
@@ -147,8 +307,18 @@ const style = computed(() => ({
   background: styleBackground.value
 }))
 const imageOptions = computed(() => ({
-  margin: imageMargin.value
+  margin: imageMargin.value,
+  imageSize: imageSize.value
 }))
+// Capped below 1: past ~0.5 the render pipeline's own scannability safety
+// cap (see computeImagePlacement's SAFE_MAX_AXIS_FRACTION) already clamps the
+// hidden centre area, so higher values stop changing the output — keeping
+// the input's range honest avoids a slider tail that silently does nothing.
+const MAX_SAFE_IMAGE_SIZE = 0.5
+const isImageSizeOutOfRange = computed(() => {
+  const v = imageSize.value
+  return typeof v === 'number' && (v < 0 || v > MAX_SAFE_IMAGE_SIZE)
+})
 const qrOptions = computed(() => ({
   errorCorrectionLevel: errorCorrectionLevel.value
 }))
@@ -175,8 +345,8 @@ function randomizeStyleSettings() {
     'square',
     'extra-rounded'
   ]
-  const cornerSquareTypes: CornerSquareType[] = ['dot', 'square', 'extra-rounded']
-  const cornerDotTypes: CornerDotType[] = ['dot', 'square']
+  const cornerSquareTypes: CornerSquareType[] = ['dot', 'square', 'rounded', 'extra-rounded']
+  const cornerDotTypes: CornerDotType[] = ['dot', 'square', 'rounded']
 
   dotsOptionsType.value = getRandomItemInArray(dotTypes)
   dotsOptionsColor.value = createRandomColor()
@@ -223,40 +393,11 @@ const allPresetOptions = computed(() => {
 const selectedPreset = ref<
   Preset & { key?: string; qrOptions?: { errorCorrectionLevel: ErrorCorrectionLevel } }
 >(defaultPreset)
-watch(selectedPreset, () => {
-  // Note: We no longer auto-fill data from presets. Users can keep their own data
-  // while changing the visual style. The QR preview will show default text if empty.
 
-  image.value = selectedPreset.value.image
-  width.value = selectedPreset.value.width
-  height.value = selectedPreset.value.height
-  margin.value = selectedPreset.value.margin
-  imageMargin.value = selectedPreset.value.imageOptions.margin
-  dotsOptionsColor.value = selectedPreset.value.dotsOptions.color
-  dotsOptionsType.value = selectedPreset.value.dotsOptions.type
-  cornersSquareOptionsColor.value = selectedPreset.value.cornersSquareOptions.color
-  cornersSquareOptionsType.value = selectedPreset.value.cornersSquareOptions.type
-  cornersDotOptionsColor.value = selectedPreset.value.cornersDotOptions.color
-  cornersDotOptionsType.value = selectedPreset.value.cornersDotOptions.type
-  styleBorderRadius.value = getNumericCSSValue(selectedPreset.value.style.borderRadius as string)
-  styleBackground.value = selectedPreset.value.style.background
-  includeBackground.value = selectedPreset.value.style.background !== 'transparent'
-  errorCorrectionLevel.value =
-    selectedPreset.value.qrOptions && selectedPreset.value.qrOptions.errorCorrectionLevel
-      ? selectedPreset.value.qrOptions.errorCorrectionLevel
-      : 'Q'
-  // Most presets don't have a frame, so we set it to false by default
-})
-
-const LAST_LOADED_LOCALLY_PRESET_KEY = 'Last saved locally'
-const LOADED_FROM_FILE_PRESET_KEY = 'Loaded from file'
-const CUSTOM_LOADED_PRESET_KEYS = [LAST_LOADED_LOCALLY_PRESET_KEY, LOADED_FROM_FILE_PRESET_KEY]
 const selectedPresetKey = ref<string>(
-  import.meta.env.VITE_DISABLE_LOCAL_STORAGE === 'true'
-    ? defaultPreset.name
-    : localStorage.getItem('qrCodeConfig')
-      ? LAST_LOADED_LOCALLY_PRESET_KEY
-      : defaultPreset.name
+  isLocalStorageEnabled() && hasStoredQRConfig()
+    ? LAST_LOADED_LOCALLY_PRESET_KEY
+    : defaultPreset.name
 )
 const lastCustomLoadedPreset = ref<Preset>()
 watch(
@@ -303,16 +444,50 @@ const recommendedErrorCorrectionLevel = computed<ErrorCorrectionLevel | null>(()
     return 'L'
   }
 })
+// A logo needs a real error-correction budget to survive the hidden centre
+// area — 'L' and 'M' can leave a code unscannable once a logo is added
+// (see mini-qr#309), so the render pipeline boosts them to 'Q' whenever an
+// image is set. Surface that here so the UI doesn't silently disagree with
+// what actually gets encoded.
+const isErrorCorrectionBoostedForLogo = computed(
+  () =>
+    Boolean(image.value) &&
+    (errorCorrectionLevel.value === 'L' || errorCorrectionLevel.value === 'M')
+)
 //#endregion
 
 //#region /* Frame settings */ Start empty, default is set intelligently */
 const defaultFrameText = computed(() => t('Scan for more info'))
 const frameText = ref<string>('')
 const frameTextPosition = ref<'top' | 'bottom' | 'left' | 'right'>('bottom')
+// Side captions only: the user sets the overall "Frame width"; the caption
+// column derives from it via the simplified relation
+//   caption width = frame width − QR width (200 preview px).
+// Invalid input (out of range / empty) shows an error and leaves the last
+// valid caption width applied.
+const FRAME_WIDTH_MIN = 250
+const FRAME_WIDTH_MAX = 800
+const frameWidth = ref(400)
+const isFrameWidthValid = computed(
+  () =>
+    typeof frameWidth.value === 'number' &&
+    Number.isFinite(frameWidth.value) &&
+    frameWidth.value >= FRAME_WIDTH_MIN &&
+    frameWidth.value <= FRAME_WIDTH_MAX
+)
+const frameCaptionWidth = ref(200)
+watch(frameWidth, () => {
+  if (isFrameWidthValid.value) {
+    frameCaptionWidth.value = frameWidth.value - PREVIEW_QRCODE_DIM_UNIT
+  }
+})
 const showFrame = ref(false)
 
-//#region /* Default QR code text */
-const defaultQRCodeText = computed(() => t('Have nice day!'))
+// Cap the framed preview's layout footprint (via FitScaleBox) so wide side
+// captions can't grow the (content-sized) preview column, push the settings
+// aside, or overflow the viewport on mobile. #element-to-export keeps its
+// natural size, so export measurements (getExportDimensions) are unaffected.
+const FRAME_PREVIEW_MAX_WIDTH = 450
 
 const frameStyle = ref<FrameStyle>({
   textColor: '#000000',
@@ -323,7 +498,117 @@ const frameStyle = ref<FrameStyle>({
   padding: '16px'
 })
 
-const selectedFramePresetKey = ref<string>(defaultFramePreset.name)
+const selectedFramePresetKey = ref<string>(
+  import.meta.env.VITE_FRAME_PRESET || defaultFramePreset.name
+)
+
+function toFrameStyle(style: Partial<FrameStyle>): FrameStyle {
+  return {
+    textColor: style.textColor ?? '#000000',
+    backgroundColor: style.backgroundColor ?? '#ffffff',
+    borderColor: style.borderColor ?? '#000000',
+    borderWidth: style.borderWidth ?? '1px',
+    borderRadius: style.borderRadius ?? '8px',
+    padding: style.padding ?? '16px',
+    ...(style.fontFamily ? { fontFamily: style.fontFamily } : {}),
+    ...(style.backgroundImage ? { backgroundImage: style.backgroundImage } : {})
+  }
+}
+
+function uploadFrameBackgroundImage() {
+  const imageInput = document.createElement('input')
+  imageInput.type = 'file'
+  imageInput.accept = 'image/*'
+  imageInput.onchange = (event: Event) => {
+    const target = event.target as HTMLInputElement
+    const file = target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      frameStyle.value = { ...frameStyle.value, backgroundImage: reader.result as string }
+    }
+    reader.readAsDataURL(file)
+  }
+  imageInput.click()
+}
+
+function removeFrameBackgroundImage() {
+  const { backgroundImage: _omitted, ...rest } = frameStyle.value
+  frameStyle.value = rest
+}
+
+// One "Background" setting switching between a color and an image. Picking
+// Color clears any uploaded image; the image mode persists implicitly via
+// frameStyle.backgroundImage, so restored configs and presets drive the
+// radio through the second watcher.
+const frameBackgroundType = ref<'color' | 'image'>('color')
+watch(frameBackgroundType, (type) => {
+  if (type === 'color') removeFrameBackgroundImage()
+})
+watch(
+  () => frameStyle.value.backgroundImage,
+  (backgroundImage) => {
+    frameBackgroundType.value = backgroundImage ? 'image' : 'color'
+  },
+  { immediate: true }
+)
+
+function loadFrameFont(fontFamily?: string) {
+  if (!fontFamily) return
+  const font = FONT_OPTIONS.find((f) => f.value === fontFamily)
+  if (font?.googleFontName) {
+    loadGoogleFont(font.googleFontName)
+  }
+}
+
+function applyFrameFromPreset(frame?: QRCodeFrameConfig) {
+  if (!frame) return
+  showFrame.value = true
+  frameText.value = frame.text || defaultFrameText.value
+  frameTextPosition.value = frame.position || 'bottom'
+  frameStyle.value = toFrameStyle(frame.style)
+  loadFrameFont(frame.style?.fontFamily)
+}
+
+function applySelectedPresetToState() {
+  const preset = selectedPreset.value
+  // Note: We no longer auto-fill data from presets. Users can keep their own data
+  // while changing the visual style. The QR preview will show default text if empty.
+
+  image.value = preset.image
+  width.value = preset.width
+  height.value = preset.height
+  margin.value = preset.margin
+  imageMargin.value = preset.imageOptions.margin
+  imageSize.value = preset.imageOptions.imageSize
+  dotsOptionsColor.value = preset.dotsOptions.color
+  dotsOptionsType.value = preset.dotsOptions.type
+  cornersSquareOptionsColor.value = preset.cornersSquareOptions.color
+  cornersSquareOptionsType.value = preset.cornersSquareOptions.type
+  cornersDotOptionsColor.value = preset.cornersDotOptions.color
+  cornersDotOptionsType.value = preset.cornersDotOptions.type
+  styleBorderRadius.value = getNumericCSSValue(preset.style.borderRadius as string)
+  styleBackground.value = preset.style.background
+  includeBackground.value = preset.style.background !== 'transparent'
+  errorCorrectionLevel.value = preset.qrOptions?.errorCorrectionLevel
+    ? preset.qrOptions.errorCorrectionLevel
+    : 'Q'
+  const frame = (preset as Preset & { frame?: QRCodeFrameConfig }).frame
+  if (frame) {
+    applyFrameFromPreset(frame)
+    const framePresetName = import.meta.env.VITE_FRAME_PRESET || preset.name
+    if (allFramePresets.some((p) => p.name === framePresetName)) {
+      selectedFramePresetKey.value = framePresetName
+    }
+  } else {
+    showFrame.value = false
+  }
+}
+
+watch(selectedPreset, applySelectedPresetToState, { immediate: true })
+
+//#region /* Default QR code text */
+const defaultQRCodeText = computed(() => t('Have nice day!'))
 const lastCustomLoadedFramePreset = ref<FramePreset>()
 const CUSTOM_LOADED_FRAME_PRESET_KEYS = [
   LAST_LOADED_LOCALLY_PRESET_KEY,
@@ -339,39 +624,77 @@ const allFramePresetOptions = computed(() => {
 
 function applyFramePreset(preset: FramePreset) {
   if (preset.style) {
-    frameStyle.value = { ...frameStyle.value, ...preset.style }
+    frameStyle.value = toFrameStyle(preset.style)
+    loadFrameFont(preset.style.fontFamily)
   }
   if (preset.text) frameText.value = preset.text
   if (preset.position) frameTextPosition.value = preset.position
+  showFrame.value = true
 }
 
-watch(
-  selectedFramePresetKey,
-  (newKey, prevKey) => {
-    if (newKey === prevKey || !newKey) return
+watch(selectedFramePresetKey, (newKey, prevKey) => {
+  if (newKey === prevKey || !newKey) return
 
-    if (
-      import.meta.env.VITE_DISABLE_LOCAL_STORAGE !== 'true' &&
-      CUSTOM_LOADED_FRAME_PRESET_KEYS.includes(newKey) &&
-      lastCustomLoadedFramePreset.value
-    ) {
-      applyFramePreset(lastCustomLoadedFramePreset.value)
-      return
-    }
+  if (
+    import.meta.env.VITE_DISABLE_LOCAL_STORAGE !== 'true' &&
+    CUSTOM_LOADED_FRAME_PRESET_KEYS.includes(newKey) &&
+    lastCustomLoadedFramePreset.value
+  ) {
+    applyFramePreset(lastCustomLoadedFramePreset.value)
+    return
+  }
 
-    const preset = allFramePresets.find((p) => p.name === newKey)
-    if (preset) {
-      applyFramePreset(preset)
-    }
-  },
-  { immediate: true }
-)
+  const preset = allFramePresets.find((p) => p.name === newKey)
+  if (preset) {
+    applyFramePreset(preset)
+  }
+})
 
 const frameSettings = computed(() => ({
   text: frameText.value,
   position: frameTextPosition.value,
-  style: frameStyle.value
+  style: frameStyle.value,
+  captionWidth: frameCaptionWidth.value
 }))
+
+const FONT_CATEGORY_LABELS: Record<FontCategory, string> = {
+  sans: 'Sans-serif',
+  serif: 'Serif',
+  monospace: 'Monospace',
+  display: 'Display & Cursive'
+}
+
+const groupedFontOptions = computed(() => {
+  const ungrouped: FontOption[] = []
+  const groups = new Map<FontCategory, FontOption[]>()
+  for (const font of FONT_OPTIONS) {
+    if (!font.category) {
+      ungrouped.push(font)
+      continue
+    }
+    const list = groups.get(font.category) ?? []
+    list.push(font)
+    groups.set(font.category, list)
+  }
+  const orderedCategories: FontCategory[] = ['sans', 'serif', 'monospace', 'display']
+  return {
+    ungrouped,
+    groups: orderedCategories
+      .filter((c) => groups.has(c))
+      .map((c) => ({ category: c, label: FONT_CATEGORY_LABELS[c], fonts: groups.get(c)! }))
+  }
+})
+
+function onFontFamilyChange(value: string): Promise<void> {
+  // value may be a label name (e.g. "Poppins" from CSV) or a full CSS value (e.g. "'Poppins', sans-serif" from UI)
+  const font = FONT_OPTIONS.find((f) => f.value === value || f.label === value)
+  const resolvedValue = font ? font.value : value
+  frameStyle.value = { ...frameStyle.value, fontFamily: resolvedValue || undefined }
+  if (font?.googleFontName) {
+    return loadGoogleFont(font.googleFontName)
+  }
+  return Promise.resolve()
+}
 //#endregion
 
 //#region /* Frame text autofill */ Fill if empty */
@@ -466,15 +789,9 @@ const copyModalIsLoading = ref(false)
 const copyModalImageSrc = ref<string | null>(null)
 
 async function openCopyModal() {
-  const el = document.getElementById('element-to-export')
-  if (!el) return
   copyModalIsLoading.value = true
   try {
-    copyModalImageSrc.value = await getPngElement(
-      el,
-      getExportDimensions(),
-      styledBorderRadiusFormatted.value
-    )
+    copyModalImageSrc.value = await getPngElement(buildImageExportInput())
     showSafariCopyImageModal.value = true
   } catch (error) {
     console.error('Error preparing image for copy modal:', error)
@@ -490,12 +807,8 @@ function closeCopyModal() {
 // #endregion
 
 function copyQRToClipboard() {
-  const el = document.getElementById('element-to-export')
-  if (!el) {
-    return
-  }
   if (IS_COPY_IMAGE_TO_CLIPBOARD_SUPPORTED) {
-    copyImageToClipboard(el, getExportDimensions(), styledBorderRadiusFormatted.value)
+    copyImageToClipboard(buildImageExportInput())
   } else if (!isLikelyMobileDevice.value) {
     // for now we only open the copy image modal on safari desktop because
     // this modal will be hidden behind the export image modal on mobile viewport.
@@ -512,84 +825,69 @@ function downloadQRImage(format: 'png' | 'svg' | 'jpg') {
     // Sanitize filename to remove invalid characters
     const sanitizedFilename = (exportFilename.value || 'qr-code').replace(/[^a-zA-Z0-9_-]/g, '_')
 
-    const formatConfig = {
-      png: { fn: downloadPngElement, filename: `${sanitizedFilename}.png` },
-      svg: { fn: downloadSvgElement, filename: `${sanitizedFilename}.svg` },
-      jpg: {
-        fn: downloadJpgElement,
-        filename: `${sanitizedFilename}.jpg`,
-        extraOptions: { bgcolor: 'white' }
-      }
-    }[format]
-
-    const el = document.getElementById('element-to-export')
-    if (!el) {
-      return
+    if (format === 'svg') {
+      downloadSvgElement(buildSvgExportInput(), `${sanitizedFilename}.svg`)
+    } else if (format === 'png') {
+      downloadPngElement(buildImageExportInput(), `${sanitizedFilename}.png`)
+    } else {
+      downloadJpgElement(buildImageExportInput(), `${sanitizedFilename}.jpg`)
     }
-
-    formatConfig.fn(
-      el,
-      formatConfig.filename,
-      { ...getExportDimensions(), ...formatConfig.extraOptions },
-      styledBorderRadiusFormatted.value
-    )
   } else {
     generateBatchQRCodes(format)
+  }
+}
+
+function buildSvgExportInput() {
+  return {
+    options: qrCodeProps.value,
+    frame: showFrame.value
+      ? {
+          text: frameText.value,
+          position: frameTextPosition.value,
+          style: frameStyle.value,
+          captionWidth: frameCaptionWidth.value
+        }
+      : null,
+    outerBackground: styleBackground.value,
+    borderRadius: exportBorderRadius.value,
+    // SVG natural size: the QR's intrinsic dimensions. Frame chrome is added
+    // by the lib's renderFramed primitive on top of this.
+    size: { width: width.value, height: height.value }
+  }
+}
+
+function buildImageExportInput() {
+  const jpgBackground = styleBackground.value === 'transparent' ? '#ffffff' : styleBackground.value
+  return {
+    ...buildSvgExportInput(),
+    // PNG/JPG final raster output dimensions — include any frame chrome
+    // expansion that the in-app preview shows.
+    targetSize: getExportDimensions(),
+    jpgBackground
   }
 }
 //#endregion
 
 //#region /* QR Config Utils - Saving, Loading and Downloading */
-interface QRCodeConfig {
-  props: StyledQRCodeProps & {
-    name?: string
-  }
-  style: {
-    borderRadius: string
-    background?: string
-  }
-  frame?: {
-    text: string
-    position: 'top' | 'bottom' | 'left' | 'right'
-    style: FrameStyle
-  } | null
-}
-
-function createQrConfig(): QRCodeConfig {
-  return {
-    props: qrCodeProps.value,
-    style: style.value,
-    frame: showFrame.value ? frameSettings.value : null
-  }
+function buildCurrentQRConfig(): QRCodeConfig {
+  return serializeQRConfig(
+    qrCodeProps.value,
+    style.value,
+    showFrame.value ? (frameSettings.value as QRCodeFrameConfig) : null
+  )
 }
 
 function downloadQRConfig() {
   console.debug('Downloading QR code config')
-  const qrCodeConfig = createQrConfig()
-  const qrCodeConfigString = JSON.stringify(qrCodeConfig)
-  const qrCodeConfigBlob = new Blob([qrCodeConfigString], { type: 'application/json' })
-  const qrCodeConfigUrl = URL.createObjectURL(qrCodeConfigBlob)
-  const qrCodeConfigLink = document.createElement('a')
-  qrCodeConfigLink.href = qrCodeConfigUrl
-  qrCodeConfigLink.download = 'qr-code-config.json'
-  qrCodeConfigLink.click()
+  const config = buildCurrentQRConfig()
+  const blob = new Blob([JSON.stringify(config)], { type: 'application/json' })
+  downloadBlob(blob, 'qr-code-config.json')
 }
 
-function saveQRConfigToLocalStorage() {
-  const qrCodeConfig = createQrConfig()
-  const qrCodeConfigString = JSON.stringify(qrCodeConfig)
-  localStorage.setItem('qrCodeConfig', qrCodeConfigString)
-}
-
-function loadQRConfig(jsonString: string, key?: string) {
-  const qrCodeConfig = JSON.parse(jsonString) as QRCodeConfig
-  const qrCodeProps = qrCodeConfig.props
-  const qrCodeStyle = qrCodeConfig.style
-  const frameConfig = qrCodeConfig.frame
-
+function applyQRConfig(config: QRCodeConfig, key?: string, options?: { restoreData?: boolean }) {
   const preset = {
-    ...qrCodeProps,
-    style: qrCodeStyle
+    ...config.props,
+    style: config.style
   } as Preset
 
   if (key) {
@@ -598,75 +896,173 @@ function loadQRConfig(jsonString: string, key?: string) {
     selectedPresetKey.value = key
   }
 
-  let framePreset: FramePreset | undefined
-
   selectedPreset.value = preset
 
-  if (frameConfig) {
-    showFrame.value = true
-    frameText.value = frameConfig.text || defaultFrameText.value
-    frameTextPosition.value = frameConfig.position || 'bottom'
-    frameStyle.value = {
-      ...frameStyle.value,
-      ...frameConfig.style
-    }
-    framePreset = {
-      name: key || LAST_LOADED_LOCALLY_PRESET_KEY,
-      style: frameConfig.style,
-      text: frameConfig.text,
-      position: frameConfig.position
-    }
+  // Style presets deliberately never touch the user's data, but an explicitly
+  // loaded config file is the user's own saved setup — restore its data too.
+  if (options?.restoreData && typeof config.props.data === 'string' && config.props.data !== '') {
+    data.value = config.props.data
   }
 
-  if (framePreset && key) {
-    lastCustomLoadedFramePreset.value = framePreset
-    selectedFramePresetKey.value = key
+  if (config.frame) {
+    showFrame.value = true
+    frameText.value = config.frame.text || defaultFrameText.value
+    frameTextPosition.value = config.frame.position || 'bottom'
+    // Stored configs keep the derived caption width; restore the user-facing
+    // frame width from it (clamped to the valid range).
+    frameWidth.value = Math.min(
+      FRAME_WIDTH_MAX,
+      Math.max(
+        FRAME_WIDTH_MIN,
+        Math.round((config.frame.captionWidth ?? 200) + PREVIEW_QRCODE_DIM_UNIT)
+      )
+    )
+    frameCaptionWidth.value = frameWidth.value - PREVIEW_QRCODE_DIM_UNIT
+    frameStyle.value = { ...frameStyle.value, ...config.frame.style }
+
+    const restoredFontFamily = config.frame.style.fontFamily
+    if (restoredFontFamily) {
+      const font = FONT_OPTIONS.find((f) => f.value === restoredFontFamily)
+      if (font?.googleFontName) {
+        loadGoogleFont(font.googleFontName)
+      }
+    }
+
+    const framePreset: FramePreset = {
+      name: key || LAST_LOADED_LOCALLY_PRESET_KEY,
+      style: config.frame.style,
+      text: config.frame.text,
+      position: config.frame.position
+    }
+
+    if (key) {
+      lastCustomLoadedFramePreset.value = framePreset
+      selectedFramePresetKey.value = key
+    }
+  }
+}
+
+function applyQRConfigFromJsonString(
+  jsonString: string,
+  key?: string,
+  options?: { restoreData?: boolean }
+) {
+  try {
+    const config: unknown = JSON.parse(jsonString)
+    // Same gate as the localStorage restore path (loadQRConfig) — config
+    // files are user-provided input and must not smuggle e.g. a javascript:
+    // logo URL into the image sinks.
+    if (!isValidQRCodeConfig(config)) {
+      console.error('Invalid QR code config, ignoring it')
+      return
+    }
+    applyQRConfig(config as QRCodeConfig, key, options)
+  } catch {
+    console.error('Failed to parse QR code config JSON')
   }
 }
 
 function loadQrConfigFromFile() {
-  console.debug('Loading QR code config')
-  const qrCodeConfigInput = document.createElement('input')
-  qrCodeConfigInput.type = 'file'
-  qrCodeConfigInput.accept = 'application/json'
-  qrCodeConfigInput.onchange = (event: Event) => {
+  console.debug('Loading QR code config from file')
+  const fileInput = document.createElement('input')
+  fileInput.type = 'file'
+  fileInput.accept = 'application/json'
+  fileInput.onchange = (event: Event) => {
     const target = event.target as HTMLInputElement
     if (target.files) {
-      const file = target.files[0]
       const reader = new FileReader()
-      reader.onload = (event: ProgressEvent<FileReader>) => {
-        const target = event.target as FileReader
-        const result = target.result as string
-        loadQRConfig(result, LOADED_FROM_FILE_PRESET_KEY)
+      reader.onload = (e: ProgressEvent<FileReader>) => {
+        applyQRConfigFromJsonString(
+          (e.target as FileReader).result as string,
+          LOADED_FROM_FILE_PRESET_KEY,
+          {
+            restoreData: true
+          }
+        )
       }
-      reader.readAsText(file)
+      reader.readAsText(target.files[0])
     }
   }
-  qrCodeConfigInput.click()
+  fileInput.click()
 }
 
 watch(
   [qrCodeProps, style, showFrame, frameSettings],
   () => {
-    saveQRConfigToLocalStorage()
+    if (isLocalStorageEnabled()) {
+      saveQRConfig(buildCurrentQRConfig())
+    }
   },
-  {
-    deep: true
-  }
+  { deep: true }
+)
+
+// Persist Simple Mode preferences independently of the QR config so toggling
+// the view never rewrites the stored design.
+watch(viewMode, (mode) => {
+  if (isLocalStorageEnabled()) saveViewMode(mode)
+})
+watch(
+  simpleFields,
+  (fields) => {
+    if (isLocalStorageEnabled()) saveSimpleFields(fields)
+  },
+  { deep: true }
 )
 
 onMounted(() => {
-  if (import.meta.env.VITE_DISABLE_LOCAL_STORAGE !== 'true') {
-    const qrCodeConfigString = localStorage.getItem('qrCodeConfig')
-    if (qrCodeConfigString) {
-      loadQRConfig(qrCodeConfigString, LAST_LOADED_LOCALLY_PRESET_KEY)
+  if (isLocalStorageEnabled()) {
+    const storedConfig = loadQRConfig()
+    if (storedConfig) {
+      applyQRConfig(storedConfig, LAST_LOADED_LOCALLY_PRESET_KEY)
     } else {
-      // No localStorage data found, use the environment variable default preset
       selectedPreset.value = { ...defaultPreset }
       selectedPresetKey.value = defaultPreset.name
     }
-    // No separate frameConfig loading from localStorage noted,
-    // assuming selectedFramePresetKey watcher handles it if lastCustomLoadedFramePreset was populated by loadQRConfig
+    // When the deployment fixes the visible fields via env, that config is
+    // authoritative — don't let a previously persisted view/fields override it.
+    if (!hasConfiguredVisibleFields) {
+      viewMode.value = loadViewMode() ?? 'full'
+      simpleFields.value = loadSimpleFields()
+    }
+  }
+
+  // Env-configured fields force a simple, fixed view.
+  if (hasConfiguredVisibleFields) {
+    viewMode.value = 'simple'
+    simpleFields.value = [...configuredVisibleFields]
+    // Run after the preset watchers settle (applySelectedPresetToState resets
+    // showFrame for frameless presets), so our overrides stick. Enable the
+    // frame when a frame field is configured, and open the visible sections
+    // explicitly — we start in simple mode so the open-state watchers never
+    // fire on their own.
+    nextTick(() => {
+      if (hasFrameField(configuredVisibleFields)) {
+        showFrame.value = true
+      }
+      openAccordionItems.value = isFrameSectionVisible.value
+        ? ['frame-settings', 'qr-code-settings']
+        : ['qr-code-settings']
+    })
+  }
+
+  // Apply frame preset when QR preset does not define a frame
+  // Only apply default frame preset if QR env preset did not already enable a frame
+  if (!showFrame.value) {
+    const framePreset = allFramePresets.find((p) => p.name === selectedFramePresetKey.value)
+    if (framePreset) {
+      applyFramePreset(framePreset)
+    }
+  } else {
+    // Re-apply frame styles after mount so UI matches env/QR preset (avoids stale defaults)
+    const preset = selectedPreset.value as Preset & { frame?: QRCodeFrameConfig }
+    if (preset.frame) {
+      applyFrameFromPreset(preset.frame)
+    } else {
+      const framePreset = allFramePresets.find((p) => p.name === selectedFramePresetKey.value)
+      if (framePreset) {
+        applyFramePreset(framePreset)
+      }
+    }
   }
 
   // Set initial data if provided through props
@@ -685,10 +1081,34 @@ enum ExportMode {
 }
 
 const exportFilename = ref('qr-code')
+const isTextExportModalOpen = ref(false)
+const isMobileExportDrawerOpen = ref(false)
+const asciiMatrix = computed<boolean[][]>(() => {
+  if (!data.value) return []
+  try {
+    return buildMatrix(data.value, errorCorrectionLevel.value).matrix
+  } catch (err) {
+    console.error('Failed to build matrix for ASCII export:', err)
+    return []
+  }
+})
+
+const asciiBatchRows = computed(() =>
+  dataStringsFromCsv.value.map((data, i) => ({
+    data,
+    fileName: fileNamesFromCsv.value[i] ?? `qr-${i}`
+  }))
+)
+
+function openTextExportModal() {
+  isMobileExportDrawerOpen.value = false
+  isTextExportModalOpen.value = true
+}
 const exportMode = ref(ExportMode.Single)
 const dataStringsFromCsv = ref<string[]>([])
 const frameTextsFromCsv = ref<string[]>([])
 const fileNamesFromCsv = ref<string[]>([])
+const fontFamiliesFromCsv = ref<string[]>([])
 
 const inputFileForBatchEncoding = ref<File | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -726,6 +1146,7 @@ const resetData = () => {
   dataStringsFromCsv.value = []
   frameTextsFromCsv.value = []
   fileNamesFromCsv.value = []
+  fontFamiliesFromCsv.value = []
   isValidCsv.value = true
   resetBatchExportProgress()
   isBatchExportSuccess.value = false
@@ -744,6 +1165,10 @@ watch(previewRowIndex, (newIndex) => {
   ) {
     data.value = dataStringsFromCsv.value[newIndex]
     frameText.value = frameTextsFromCsv.value[newIndex] || defaultFrameText.value
+    const fontFamily = fontFamiliesFromCsv.value[newIndex]
+    if (fontFamily !== undefined) {
+      onFontFamilyChange(fontFamily)
+    }
   }
 })
 
@@ -795,6 +1220,7 @@ const onBatchInputFileUpload = (event: Event) => {
     dataStringsFromCsv.value = batchResult.urls
     frameTextsFromCsv.value = batchResult.frameTexts
     fileNamesFromCsv.value = batchResult.fileNames
+    fontFamiliesFromCsv.value = batchResult.fontFamilies
     showFrame.value = batchResult.hasCustomFrameText
     isValidCsv.value = true
     previewRowIndex.value = 0 // Reset preview to first row on new upload
@@ -803,6 +1229,10 @@ const onBatchInputFileUpload = (event: Event) => {
     if (batchResult.urls.length > 0) {
       data.value = batchResult.urls[0]
       frameText.value = batchResult.frameTexts[0] || defaultFrameText.value
+      const firstFontFamily = batchResult.fontFamilies[0]
+      if (firstFontFamily) {
+        onFontFamilyChange(firstFontFamily)
+      }
     }
   }
 
@@ -844,26 +1274,26 @@ async function generateBatchQRCodes(format: 'png' | 'svg' | 'jpg') {
   isExportingBatchQRs.value = true
   const zip = new JSZip()
   let numQrCodesCreated = 0
-  const el = document.getElementById('element-to-export')
-  if (!el) {
-    return
-  }
 
   try {
     for (let index = 0; index < dataStringsFromCsv.value.length; index++) {
       currentExportedQrCodeIndex.value = index
       const url = dataStringsFromCsv.value[index]
       const currentFrameText = frameTextsFromCsv.value[index]
+      const currentFontFamily = fontFamiliesFromCsv.value[index]
       data.value = url
       frameText.value = currentFrameText
+      if (currentFontFamily !== undefined) {
+        await onFontFamilyChange(currentFontFamily)
+      }
       await sleep(1000)
       let dataUrl: string = ''
       if (format === 'png') {
-        dataUrl = await getPngElement(el, getExportDimensions(), styledBorderRadiusFormatted.value)
+        dataUrl = await getPngElement(buildImageExportInput())
       } else if (format === 'jpg') {
-        dataUrl = await getJpgElement(el, getExportDimensions(), styledBorderRadiusFormatted.value)
+        dataUrl = await getJpgElement(buildImageExportInput())
       } else {
-        dataUrl = await getSvgString(el, getExportDimensions(), styledBorderRadiusFormatted.value)
+        dataUrl = await getInlinedSvgString(buildSvgExportInput())
       }
       createZipFile(zip, dataUrl, index, format)
       numQrCodesCreated++
@@ -874,10 +1304,7 @@ async function generateBatchQRCodes(format: 'png' | 'svg' | 'jpg') {
     }
 
     zip.generateAsync({ type: 'blob' }).then((content) => {
-      const link = document.createElement('a')
-      link.href = URL.createObjectURL(content)
-      link.download = `qr-codes.zip`
-      link.click()
+      downloadBlob(content, 'qr-codes.zip')
       isBatchExportSuccess.value = true
     })
   } catch (error) {
@@ -907,18 +1334,16 @@ const updateDataFromModal = (newData: string) => {
 </script>
 
 <template>
-  <div
-    class="flex items-start justify-center gap-4 overflow-x-hidden md:flex-row md:gap-6 lg:gap-12 lg:pb-0"
-  >
+  <div class="flex items-start justify-center gap-4 md:flex-row md:gap-6 lg:gap-12 lg:pb-0">
     <!-- Sticky sidebar on large screens -->
     <div
       v-if="isLarge"
       ref="mainContentContainer"
       id="main-content-container"
-      class="sticky top-0 flex w-full shrink-0 flex-col items-center justify-center p-4 md:w-fit"
+      class="sticky top-0 flex max-h-[calc(100vh-6.5rem)] w-full shrink-0 flex-col items-center justify-start overflow-y-auto p-4 md:w-fit"
     ></div>
     <!-- Bottom sheet on small screens -->
-    <Drawer v-else>
+    <Drawer v-else v-model:open="isMobileExportDrawerOpen">
       <DrawerTrigger
         id="drawer-preview-container"
         class="fixed inset-x-0 bottom-0 z-10 rounded-t-lg border-t border-solid border-slate-300 bg-white shadow-2xl outline-none focus-visible:ring-1 focus-visible:ring-zinc-700 dark:bg-black dark:focus-visible:ring-zinc-200"
@@ -926,39 +1351,53 @@ const updateDataFromModal = (newData: string) => {
         <div class="flex flex-col items-center">
           <!-- Handle indicator for bottom sheet -->
           <div class="mt-2 h-1 w-16 rounded-full bg-gray-300 dark:bg-gray-700"></div>
-          <div :class="['w-full', '-my-8']">
-            <div class="flex origin-center scale-[0.7] items-center justify-center md:scale-100">
-              <QRCodeFrame
-                v-if="showFrame"
-                :frame-text="frameText"
-                :text-position="frameTextPosition"
-                :frame-style="frameStyle"
-              >
-                <template #qr-code>
-                  <div id="qr-code-container" class="grid place-items-center">
-                    <div
-                      class="grid place-items-center overflow-hidden"
-                      :style="[
-                        style,
-                        {
-                          width: `${PREVIEW_QRCODE_DIM_UNIT}px`,
-                          height: `${PREVIEW_QRCODE_DIM_UNIT}px`
-                        }
-                      ]"
-                    >
-                      <StyledQRCode
-                        v-bind="{
-                          ...qrCodeProps,
-                          width: PREVIEW_QRCODE_DIM_UNIT,
-                          height: PREVIEW_QRCODE_DIM_UNIT
-                        }"
-                        role="img"
-                        aria-label="QR code"
-                      />
+          <!--
+            Framed previews are sized exactly by FitScaleBox (capped width AND
+            height), so they skip the negative-margin/static-scale hack that
+            reclaims the dead layout space a transform-scaled plain QR leaves —
+            with an exact box those negative margins would pull the Export hint
+            up underneath the preview.
+          -->
+          <div :class="['w-full', showFrame ? 'py-1' : '-my-8']">
+            <div
+              :class="[
+                'flex items-center justify-center',
+                !showFrame && 'origin-center scale-[0.7] md:scale-100'
+              ]"
+            >
+              <FitScaleBox v-if="showFrame" :viewport-margin="32" :max-height="150">
+                <QRCodeFrame
+                  :frame-text="frameText"
+                  :text-position="frameTextPosition"
+                  :frame-style="frameStyle"
+                  :caption-width="frameCaptionWidth"
+                >
+                  <template #qr-code>
+                    <div id="qr-code-container" class="grid place-items-center">
+                      <div
+                        class="grid place-items-center overflow-hidden"
+                        :style="[
+                          style,
+                          {
+                            width: `${PREVIEW_QRCODE_DIM_UNIT}px`,
+                            height: `${PREVIEW_QRCODE_DIM_UNIT}px`
+                          }
+                        ]"
+                      >
+                        <StyledQRCode
+                          v-bind="{
+                            ...qrCodeProps,
+                            width: PREVIEW_QRCODE_DIM_UNIT,
+                            height: PREVIEW_QRCODE_DIM_UNIT
+                          }"
+                          role="img"
+                          aria-label="QR code"
+                        />
+                      </div>
                     </div>
-                  </div>
-                </template>
-              </QRCodeFrame>
+                  </template>
+                </QRCodeFrame>
+              </FitScaleBox>
               <template v-else>
                 <div class="grid place-items-center">
                   <div
@@ -1023,45 +1462,48 @@ const updateDataFromModal = (newData: string) => {
     <!-- Main content -->
     <Teleport to="#main-content-container" v-if="mainContentContainer != null">
       <div id="main-content">
-        <div
-          id="qr-code-container"
-          :class="[
-            'grid origin-center place-items-center',
-            showFrame && ['left', 'right'].includes(frameTextPosition) && 'scale-[0.7] md:scale-100'
-          ]"
-        >
-          <div v-if="showFrame" id="element-to-export">
-            <QRCodeFrame
-              :frame-text="frameText"
-              :text-position="frameTextPosition"
-              :frame-style="frameStyle"
-            >
-              <template #qr-code>
-                <div id="qr-code-container" class="grid place-items-center">
-                  <div
-                    class="grid place-items-center overflow-hidden"
-                    :style="[
-                      style,
-                      {
-                        width: `${PREVIEW_QRCODE_DIM_UNIT}px`,
-                        height: `${PREVIEW_QRCODE_DIM_UNIT}px`
-                      }
-                    ]"
-                  >
-                    <StyledQRCode
-                      v-bind="{
-                        ...qrCodeProps,
-                        width: PREVIEW_QRCODE_DIM_UNIT,
-                        height: PREVIEW_QRCODE_DIM_UNIT
-                      }"
-                      role="img"
-                      aria-label="QR code"
-                    />
+        <div id="qr-code-container" class="grid origin-center place-items-center">
+          <!--
+            When the framed preview is wider than the cap, FitScaleBox renders
+            it scaled inside a wrapper sized to the scaled footprint — the
+            layout box never exceeds the cap, so the settings column stays put
+            and nothing overflows the viewport.
+          -->
+          <FitScaleBox v-if="showFrame" :max-width="FRAME_PREVIEW_MAX_WIDTH">
+            <div id="element-to-export" class="w-fit">
+              <QRCodeFrame
+                :frame-text="frameText"
+                :text-position="frameTextPosition"
+                :frame-style="frameStyle"
+                :caption-width="frameCaptionWidth"
+              >
+                <template #qr-code>
+                  <div id="qr-code-container" class="grid place-items-center">
+                    <div
+                      class="grid place-items-center overflow-hidden"
+                      :style="[
+                        style,
+                        {
+                          width: `${PREVIEW_QRCODE_DIM_UNIT}px`,
+                          height: `${PREVIEW_QRCODE_DIM_UNIT}px`
+                        }
+                      ]"
+                    >
+                      <StyledQRCode
+                        v-bind="{
+                          ...qrCodeProps,
+                          width: PREVIEW_QRCODE_DIM_UNIT,
+                          height: PREVIEW_QRCODE_DIM_UNIT
+                        }"
+                        role="img"
+                        aria-label="QR code"
+                      />
+                    </div>
                   </div>
-                </div>
-              </template>
-            </QRCodeFrame>
-          </div>
+                </template>
+              </QRCodeFrame>
+            </div>
+          </FitScaleBox>
           <div
             v-else
             id="element-to-export"
@@ -1086,8 +1528,8 @@ const updateDataFromModal = (newData: string) => {
             />
           </div>
         </div>
-        <div class="mt-4 flex flex-col items-center gap-8">
-          <div class="flex flex-col items-center justify-center gap-3">
+        <div class="mt-3 flex flex-col items-center gap-4">
+          <div class="flex flex-col items-center justify-center gap-2">
             <button
               v-if="exportMode !== ExportMode.Batch"
               id="copy-qr-image-button"
@@ -1131,10 +1573,9 @@ const updateDataFromModal = (newData: string) => {
                   stroke-width="2"
                 >
                   <path d="M14 3v4a1 1 0 0 0 1 1h4" />
-                  <path
-                    d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2zm-5-4v-6"
-                  />
-                  <path d="M9.5 13.5L12 11l2.5 2.5" />
+                  <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+                  <path d="M12 11v6" />
+                  <path d="M9.5 14.5L12 17l2.5-2.5" />
                 </g>
               </svg>
               <p>{{ t('Save QR Code configuration') }}</p>
@@ -1154,9 +1595,8 @@ const updateDataFromModal = (newData: string) => {
                   stroke-width="2"
                 >
                   <path d="M14 3v4a1 1 0 0 0 1 1h4" />
-                  <path
-                    d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2zm-5-10v6"
-                  />
+                  <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+                  <path d="M12 17v-6" />
                   <path d="M9.5 13.5L12 11l2.5 2.5" />
                 </g>
               </svg>
@@ -1288,32 +1728,191 @@ const updateDataFromModal = (newData: string) => {
                     </g>
                   </svg>
                 </button>
+                <button
+                  id="download-qr-text-button"
+                  class="button"
+                  @click="openTextExportModal"
+                  :disabled="isExportButtonDisabled"
+                  :title="
+                    isExportButtonDisabled
+                      ? t('Please enter data to encode first')
+                      : t('Export QR Code as ASCII or Unicode text')
+                  "
+                  :aria-label="t('Export QR Code as ASCII or Unicode text')"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="24"
+                    height="24"
+                    viewBox="0 0 24 24"
+                  >
+                    <g fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                      <path d="M5 12V5a2 2 0 0 1 2-2h7l5 5v4" />
+                      <text
+                        x="1"
+                        y="22"
+                        fill="currentColor"
+                        stroke="none"
+                        font-size="11px"
+                        font-family="monospace"
+                        font-weight="600"
+                      >
+                        TXT
+                      </text>
+                    </g>
+                  </svg>
+                </button>
               </div>
             </div>
           </section>
+
+          <div class="mt-2 hidden flex-wrap items-center justify-center gap-2 md:flex">
+            <a
+              href="https://github.com/lyqht/mini-qr/discussions"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="inline-flex items-center justify-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs text-zinc-700 outline-none hover:bg-zinc-50 focus-visible:ring-1 focus-visible:ring-zinc-700 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+              </svg>
+              {{ t('Feedback') }}
+            </a>
+            <a
+              href="https://github.com/lyqht/mini-qr/issues/new?template=qr-lib-bug.yml"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="inline-flex items-center justify-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs text-zinc-700 outline-none hover:bg-zinc-50 focus-visible:ring-1 focus-visible:ring-zinc-700 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+              </svg>
+              {{ t('Report an issue') }}
+            </a>
+          </div>
         </div>
       </div>
     </Teleport>
 
-    <section id="settings" class="flex w-full grow flex-col items-start gap-8 text-start">
+    <section
+      id="settings"
+      class="flex w-full grow flex-col items-start gap-8 text-start"
+      :class="{ 'mode-animating': isModeAnimating }"
+      :style="{ paddingBottom: settingsBottomPadding }"
+    >
       <h2 class="sr-only">{{ t('Settings to customize your QR code') }}</h2>
+
+      <!-- View mode toggle: Simple shows only the data field plus pinned
+           fields; Full shows every setting. Sits at the top of the settings
+           column so it is reachable on both desktop and (stacked) mobile.
+           Hidden unless VITE_QR_CREATE_SIMPLE_FULL_MODE_TOGGLE is enabled. -->
+      <div v-if="showModeControls" class="flex w-full flex-col gap-3">
+        <div
+          class="flex flex-row flex-wrap items-center gap-2"
+          role="group"
+          :aria-label="t('Configuration view mode')"
+        >
+          <div
+            class="inline-flex rounded-lg border border-zinc-300 p-1 dark:border-zinc-700"
+            role="radiogroup"
+            :aria-label="t('Configuration view mode')"
+          >
+            <button
+              id="view-mode-simple"
+              type="button"
+              role="radio"
+              :aria-checked="isSimpleMode"
+              class="rounded-md px-3 py-1 text-sm font-medium transition-colors"
+              :class="
+                isSimpleMode
+                  ? 'bg-zinc-200 text-gray-900 dark:bg-zinc-700 dark:text-gray-100'
+                  : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+              "
+              @click="setViewMode('simple')"
+            >
+              {{ t('Simple') }}
+            </button>
+            <button
+              id="view-mode-full"
+              type="button"
+              role="radio"
+              :aria-checked="!isSimpleMode"
+              class="rounded-md px-3 py-1 text-sm font-medium transition-colors"
+              :class="
+                !isSimpleMode
+                  ? 'bg-zinc-200 text-gray-900 dark:bg-zinc-700 dark:text-gray-100'
+                  : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+              "
+              @click="setViewMode('full')"
+            >
+              {{ t('Full') }}
+            </button>
+          </div>
+          <button
+            v-if="isSimpleMode"
+            id="customize-fields-button"
+            type="button"
+            class="button flex flex-row items-center gap-1 text-sm"
+            @click="isCustomizeFieldsOpen = true"
+          >
+            <!-- Icon from Tabler Icons by Paweł Kuna -->
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24">
+              <g
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+              >
+                <path d="M4 6h8M16 6h4M4 12h4M12 12h8M4 18h12M18 18h2" />
+                <circle cx="14" cy="6" r="2" />
+                <circle cx="10" cy="12" r="2" />
+                <circle cx="16" cy="18" r="2" />
+              </g>
+            </svg>
+            <span>{{ t('Customize fields') }}</span>
+          </button>
+        </div>
+        <p v-if="isSimpleMode" class="text-sm text-gray-500 dark:text-gray-400">
+          {{ t('Showing only the fields you use. Customize to show more.') }}
+        </p>
+      </div>
+
       <Accordion
+        v-model="openAccordionItems"
         type="multiple"
         collapsible
         class="flex w-full flex-col gap-4"
-        :default-value="['qr-code-settings']"
       >
-        <AccordionItem value="frame-settings">
+        <AccordionItem v-show="isFrameSectionVisible" value="frame-settings">
           <AccordionTrigger
             class="button !px-4 text-2xl text-gray-700 outline-none dark:text-gray-100 md:!px-6 lg:!px-8"
-            ><span class="flex flex-row items-center gap-2"
-              ><span id="frame-settings-title">{{ t('Frame settings') }}</span>
-              <span
-                class="rounded-full bg-white px-2 py-0.5 text-xs font-medium text-zinc-800 dark:bg-zinc-700 dark:text-zinc-200"
-              >
-                {{ t('New!') }}
-              </span></span
-            ></AccordionTrigger
+            ><span id="frame-settings-title">{{ t('Frame settings') }}</span></AccordionTrigger
           >
           <AccordionContent class="px-2 pb-8 pt-4">
             <section class="w-full space-y-4" aria-labelledby="frame-settings-title">
@@ -1323,7 +1922,10 @@ const updateDataFromModal = (newData: string) => {
               </div>
 
               <template v-if="showFrame">
-                <div class="flex flex-col sm:flex-row sm:items-center sm:gap-8">
+                <div
+                  class="field-reveal flex flex-col sm:flex-row sm:items-center sm:gap-8"
+                  v-show="isFieldVisible('framePreset')"
+                >
                   <div class="flex flex-col sm:w-1/2">
                     <label>{{ t('Frame preset') }}</label>
                     <Combobox
@@ -1333,9 +1935,24 @@ const updateDataFromModal = (newData: string) => {
                     />
                   </div>
                 </div>
-                <div class="flex flex-col">
-                  <label class="mb-2 block">{{ t('Text position') }}</label>
-                  <fieldset class="flex-1">
+                <fieldset
+                  class="field-reveal flex flex-col gap-4"
+                  v-show="isGroupVisible(['frameText', 'framePosition'])"
+                >
+                  <legend class="mb-2 block">{{ t('Caption') }}</legend>
+                  <div v-show="isFieldVisible('frameText')">
+                    <label for="frame-text" class="mb-2 block text-sm">{{ t('Text') }}</label>
+                    <textarea
+                      name="frame-text"
+                      class="text-input"
+                      id="frame-text"
+                      rows="2"
+                      :placeholder="defaultFrameText"
+                      v-model="frameText"
+                    />
+                  </div>
+                  <fieldset v-show="isFieldVisible('framePosition')">
+                    <legend class="mb-2 block text-sm">{{ t('Position') }}</legend>
                     <div
                       class="radio"
                       v-for="position in ['top', 'bottom', 'right', 'left']"
@@ -1350,24 +1967,58 @@ const updateDataFromModal = (newData: string) => {
                       <label :for="'frameTextPosition-' + position">{{ t(position) }}</label>
                     </div>
                   </fieldset>
-                </div>
-                <div>
-                  <div class="mb-2 flex flex-row items-center gap-2">
-                    <label for="frame-text">{{ t('Frame text') }}</label>
-                  </div>
-                  <textarea
-                    name="frame-text"
-                    class="text-input"
-                    id="frame-text"
-                    rows="2"
-                    :placeholder="defaultFrameText"
-                    v-model="frameText"
-                  />
-                </div>
-                <div>
+                </fieldset>
+                <div
+                  class="field-reveal"
+                  v-show="
+                    isGroupVisible([
+                      'frameWidth',
+                      'frameTextColor',
+                      'frameBackground',
+                      'frameBorderColor',
+                      'frameBorderWidth',
+                      'frameBorderRadius',
+                      'framePadding',
+                      'frameFontFamily'
+                    ])
+                  "
+                >
                   <label class="mb-2 block">{{ t('Frame style') }}</label>
                   <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <div>
+                    <div
+                      v-if="
+                        isFieldVisible('frameWidth') &&
+                        (frameTextPosition === 'left' || frameTextPosition === 'right')
+                      "
+                    >
+                      <label for="frame-width" class="mb-1 block text-sm">{{
+                        t('Frame width')
+                      }}</label>
+                      <input
+                        id="frame-width"
+                        type="number"
+                        class="text-input"
+                        :min="FRAME_WIDTH_MIN"
+                        :max="FRAME_WIDTH_MAX"
+                        step="10"
+                        v-model.number="frameWidth"
+                        :aria-invalid="!isFrameWidthValid"
+                        aria-describedby="frame-width-error"
+                      />
+                      <p
+                        v-if="!isFrameWidthValid"
+                        id="frame-width-error"
+                        class="mt-1 text-sm font-normal text-red-600 dark:text-red-400"
+                      >
+                        {{
+                          t('Must be between {min} and {max} px', {
+                            min: FRAME_WIDTH_MIN,
+                            max: FRAME_WIDTH_MAX
+                          })
+                        }}
+                      </p>
+                    </div>
+                    <div v-show="isFieldVisible('frameTextColor')">
                       <label for="frame-text-color" class="mb-1 block text-sm">{{
                         t('Text color')
                       }}</label>
@@ -1378,18 +2029,73 @@ const updateDataFromModal = (newData: string) => {
                         v-model="frameStyle.textColor"
                       />
                     </div>
-                    <div>
-                      <label for="frame-bg-color" class="mb-1 block text-sm">{{
-                        t('Background color')
-                      }}</label>
+                    <fieldset v-show="isFieldVisible('frameBackground')">
+                      <legend class="mb-1 block text-sm">{{ t('Background') }}</legend>
+                      <div class="flex flex-row items-center gap-4">
+                        <div class="radio">
+                          <input
+                            id="frame-background-type-color"
+                            type="radio"
+                            value="color"
+                            v-model="frameBackgroundType"
+                          />
+                          <label for="frame-background-type-color">{{ t('Color') }}</label>
+                        </div>
+                        <div class="radio">
+                          <input
+                            id="frame-background-type-image"
+                            type="radio"
+                            value="image"
+                            v-model="frameBackgroundType"
+                          />
+                          <label for="frame-background-type-image">{{ t('Image') }}</label>
+                        </div>
+                      </div>
                       <input
+                        v-if="frameBackgroundType === 'color'"
                         id="frame-bg-color"
                         type="color"
-                        class="color-input"
+                        class="color-input mt-2"
+                        :aria-label="t('Background color')"
                         v-model="frameStyle.backgroundColor"
                       />
-                    </div>
-                    <div>
+                      <div v-else class="mt-2 flex flex-row items-center gap-2">
+                        <button
+                          id="frame-background-image-upload"
+                          class="icon-button flex flex-row items-center"
+                          @click="uploadFrameBackgroundImage"
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="24"
+                            height="24"
+                            viewBox="0 0 24 24"
+                          >
+                            <g
+                              fill="none"
+                              stroke="currentColor"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                              stroke-width="2"
+                            >
+                              <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                              <path
+                                d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2zm-5-10v6"
+                              />
+                              <path d="M9.5 13.5L12 11l2.5 2.5" />
+                            </g>
+                          </svg>
+                          <span>{{ t('Upload image') }}</span>
+                        </button>
+                        <img
+                          v-if="frameStyle.backgroundImage"
+                          :src="frameStyle.backgroundImage"
+                          :alt="t('Background image')"
+                          class="size-8 rounded border border-gray-300 object-cover dark:border-gray-600"
+                        />
+                      </div>
+                    </fieldset>
+                    <div v-show="isFieldVisible('frameBorderColor')">
                       <label for="frame-border-color" class="mb-1 block text-sm">{{
                         t('Border color')
                       }}</label>
@@ -1400,7 +2106,7 @@ const updateDataFromModal = (newData: string) => {
                         v-model="frameStyle.borderColor"
                       />
                     </div>
-                    <div>
+                    <div v-show="isFieldVisible('frameBorderWidth')">
                       <label for="frame-border-width" class="mb-1 block text-sm">{{
                         t('Border width')
                       }}</label>
@@ -1412,7 +2118,7 @@ const updateDataFromModal = (newData: string) => {
                         placeholder="1px"
                       />
                     </div>
-                    <div>
+                    <div v-show="isFieldVisible('frameBorderRadius')">
                       <label for="frame-border-radius" class="mb-1 block text-sm">{{
                         t('Border radius')
                       }}</label>
@@ -1424,7 +2130,7 @@ const updateDataFromModal = (newData: string) => {
                         placeholder="8px"
                       />
                     </div>
-                    <div>
+                    <div v-show="isFieldVisible('framePadding')">
                       <label for="frame-padding" class="mb-1 block text-sm">{{
                         t('Padding')
                       }}</label>
@@ -1435,6 +2141,40 @@ const updateDataFromModal = (newData: string) => {
                         v-model="frameStyle.padding"
                         placeholder="16px"
                       />
+                    </div>
+                    <div class="sm:col-span-2" v-show="isFieldVisible('frameFontFamily')">
+                      <label for="frame-font-family" class="mb-1 block text-sm">{{
+                        t('Font family')
+                      }}</label>
+                      <select
+                        id="frame-font-family"
+                        class="w-full text-input"
+                        :value="frameStyle.fontFamily ?? ''"
+                        @change="onFontFamilyChange(($event.target as HTMLSelectElement).value)"
+                      >
+                        <option
+                          v-for="font in groupedFontOptions.ungrouped"
+                          :key="font.value"
+                          :value="font.value"
+                          :style="font.value ? { fontFamily: font.value } : {}"
+                        >
+                          {{ font.label }}
+                        </option>
+                        <optgroup
+                          v-for="group in groupedFontOptions.groups"
+                          :key="group.category"
+                          :label="t(group.label)"
+                        >
+                          <option
+                            v-for="font in group.fonts"
+                            :key="font.value"
+                            :value="font.value"
+                            :style="{ fontFamily: font.value }"
+                          >
+                            {{ font.label }}
+                          </option>
+                        </optgroup>
+                      </select>
                     </div>
                   </div>
                 </div>
@@ -1449,7 +2189,7 @@ const updateDataFromModal = (newData: string) => {
           >
           <AccordionContent class="px-2 pb-8 pt-4">
             <section class="w-full space-y-4" aria-labelledby="qr-code-settings-title">
-              <div>
+              <div class="field-reveal" v-show="isFieldVisible('preset')">
                 <label>{{ t('Preset') }}</label>
                 <div class="flex flex-row items-center justify-start gap-2">
                   <Combobox
@@ -1637,6 +2377,17 @@ const updateDataFromModal = (newData: string) => {
                                       {{ fileNamesFromCsv[previewRowIndex] }}
                                     </code>
                                   </div>
+                                  <div v-if="fontFamiliesFromCsv[previewRowIndex]">
+                                    <span
+                                      class="text-xs font-medium text-gray-500 dark:text-gray-400"
+                                      >{{ $t('Font family') }}</span
+                                    >
+                                    <code
+                                      class="rounded bg-white px-2 py-1 font-mono text-sm dark:bg-gray-900"
+                                    >
+                                      {{ fontFamiliesFromCsv[previewRowIndex] }}
+                                    </code>
+                                  </div>
                                 </div>
                               </div>
                               <div class="mt-2 flex items-center justify-between">
@@ -1680,7 +2431,7 @@ const updateDataFromModal = (newData: string) => {
                   </div>
                 </div>
               </div>
-              <div class="w-full">
+              <div class="field-reveal w-full" v-show="isFieldVisible('logoImage')">
                 <div class="mb-2 flex flex-row items-center gap-2">
                   <label for="image-url">
                     {{ t('Logo image URL') }}
@@ -1718,14 +2469,30 @@ const updateDataFromModal = (newData: string) => {
                   v-model="image"
                 />
               </div>
-              <div class="flex flex-row items-center gap-2">
+              <div
+                class="field-reveal flex flex-row items-center gap-2"
+                v-show="isFieldVisible('logoBackground')"
+              >
                 <label for="with-background">
                   {{ t('With background') }}
                 </label>
                 <input id="with-background" type="checkbox" v-model="includeBackground" />
               </div>
-              <div id="color-settings" :class="'flex w-full flex-row flex-wrap gap-4'">
+              <div
+                id="color-settings"
+                class="field-reveal"
+                :class="'flex w-full flex-row flex-wrap gap-4'"
+                v-show="
+                  isGroupVisible([
+                    'backgroundColor',
+                    'dotsColor',
+                    'cornersSquareColor',
+                    'cornersDotColor'
+                  ])
+                "
+              >
                 <div
+                  v-show="isFieldVisible('backgroundColor')"
                   :inert="!includeBackground"
                   :class="[!includeBackground && 'opacity-30', 'flex flex-row items-center gap-2']"
                 >
@@ -1737,7 +2504,7 @@ const updateDataFromModal = (newData: string) => {
                     v-model="styleBackground"
                   />
                 </div>
-                <div class="flex flex-row items-center gap-2">
+                <div class="flex flex-row items-center gap-2" v-show="isFieldVisible('dotsColor')">
                   <label for="dots-color">{{ t('Dots color') }}</label>
                   <input
                     id="dots-color"
@@ -1746,7 +2513,10 @@ const updateDataFromModal = (newData: string) => {
                     v-model="dotsOptionsColor"
                   />
                 </div>
-                <div class="flex flex-row items-center gap-2">
+                <div
+                  class="flex flex-row items-center gap-2"
+                  v-show="isFieldVisible('cornersSquareColor')"
+                >
                   <label for="corners-square-color">{{ t('Corners Square color') }}</label>
                   <input
                     id="corners-square-color"
@@ -1755,7 +2525,10 @@ const updateDataFromModal = (newData: string) => {
                     v-model="cornersSquareOptionsColor"
                   />
                 </div>
-                <div class="flex flex-row items-center gap-2">
+                <div
+                  class="flex flex-row items-center gap-2"
+                  v-show="isFieldVisible('cornersDotColor')"
+                >
                   <label for="corners-dot-color">{{ t('Corners Dot color') }}</label>
                   <input
                     id="corners-dot-color"
@@ -1765,8 +2538,11 @@ const updateDataFromModal = (newData: string) => {
                   />
                 </div>
               </div>
-              <div class="flex w-full flex-col gap-4 sm:flex-row sm:gap-8">
-                <div class="w-full sm:w-1/3">
+              <div
+                class="field-reveal flex w-full flex-col gap-4 sm:flex-row sm:gap-8"
+                v-show="isGroupVisible(['width', 'height', 'borderRadius'])"
+              >
+                <div class="w-full sm:w-1/3" v-show="isFieldVisible('width')">
                   <label for="width">
                     {{ t('Width (px)') }}
                   </label>
@@ -1778,7 +2554,7 @@ const updateDataFromModal = (newData: string) => {
                     v-model="width"
                   />
                 </div>
-                <div class="w-full sm:w-1/3">
+                <div class="w-full sm:w-1/3" v-show="isFieldVisible('height')">
                   <label for="height">
                     {{ t('Height (px)') }}
                   </label>
@@ -1790,7 +2566,7 @@ const updateDataFromModal = (newData: string) => {
                     v-model="height"
                   />
                 </div>
-                <div class="w-full sm:w-1/3">
+                <div class="w-full sm:w-1/3" v-show="isFieldVisible('borderRadius')">
                   <label for="border-radius">
                     {{ t('Border radius (px)') }}
                   </label>
@@ -1803,20 +2579,41 @@ const updateDataFromModal = (newData: string) => {
                   />
                 </div>
               </div>
-              <div class="flex w-full flex-col gap-4 sm:flex-row sm:gap-8">
-                <div class="w-full sm:w-1/2">
+              <div
+                class="field-reveal flex w-full flex-col gap-4 sm:flex-row sm:gap-8"
+                v-show="isGroupVisible(['margin', 'imageMargin', 'imageSize'])"
+              >
+                <div class="w-full sm:w-1/3" v-show="isFieldVisible('margin')">
                   <label for="margin">
-                    {{ t('Margin (px)') }}
+                    {{ t('Margin (modules)') }}
                   </label>
-                  <input
-                    class="text-input"
-                    id="margin"
-                    type="number"
-                    placeholder="0"
-                    v-model="margin"
-                  />
+                  <Popover :open="showMarginHint">
+                    <PopoverAnchor as-child>
+                      <input
+                        class="text-input"
+                        id="margin"
+                        type="number"
+                        placeholder="0"
+                        v-model="margin"
+                        @focus="showMarginHint = true"
+                        @blur="showMarginHint = false"
+                      />
+                    </PopoverAnchor>
+                    <PopoverContent
+                      class="w-64 p-3 text-sm"
+                      side="bottom"
+                      align="start"
+                      @open-auto-focus="(e: Event) => e.preventDefault()"
+                    >
+                      {{
+                        t(
+                          'Suggested: 4 modules — the ISO/IEC 18004 quiet zone minimum for reliable scanning.'
+                        )
+                      }}
+                    </PopoverContent>
+                  </Popover>
                 </div>
-                <div class="w-full sm:w-1/2">
+                <div class="w-full sm:w-1/3" v-show="isFieldVisible('imageMargin')">
                   <label for="image-margin">
                     {{ t('Image margin (px)') }}
                   </label>
@@ -1828,12 +2625,44 @@ const updateDataFromModal = (newData: string) => {
                     v-model="imageMargin"
                   />
                 </div>
+                <div class="w-full sm:w-1/3" v-show="isFieldVisible('imageSize')">
+                  <label for="image-size">
+                    {{ t('Image size (ratio)') }}
+                  </label>
+                  <input
+                    class="text-input"
+                    id="image-size"
+                    type="number"
+                    min="0"
+                    :max="MAX_SAFE_IMAGE_SIZE"
+                    step="0.05"
+                    placeholder="0.4"
+                    v-model.number="imageSize"
+                    :aria-invalid="isImageSizeOutOfRange"
+                    aria-describedby="image-size-error"
+                  />
+                  <p
+                    v-if="isImageSizeOutOfRange"
+                    id="image-size-error"
+                    class="ms-1 mt-1 text-xs font-normal text-red-600 dark:text-red-400"
+                  >
+                    {{ t('Must be between 0 and {max}', { max: MAX_SAFE_IMAGE_SIZE }) }}
+                  </p>
+                </div>
               </div>
               <div
                 id="dots-squares-settings"
-                class="mb-4 flex w-full flex-col flex-wrap gap-6 md:flex-row"
+                class="field-reveal mb-4 flex w-full flex-col flex-wrap gap-6 md:flex-row"
+                v-show="
+                  isGroupVisible([
+                    'dotsType',
+                    'cornersSquareType',
+                    'cornersDotType',
+                    'errorCorrectionLevel'
+                  ])
+                "
               >
-                <fieldset class="flex-1">
+                <fieldset class="flex-1" v-show="isFieldVisible('dotsType')">
                   <legend>{{ t('Dots type') }}</legend>
                   <div
                     class="radio"
@@ -1856,9 +2685,13 @@ const updateDataFromModal = (newData: string) => {
                     <label :for="'dotsOptionsType-' + type">{{ t(type) }}</label>
                   </div>
                 </fieldset>
-                <fieldset class="flex-1">
+                <fieldset class="flex-1" v-show="isFieldVisible('cornersSquareType')">
                   <legend>{{ t('Corners Square type') }}</legend>
-                  <div class="radio" v-for="type in ['dot', 'square', 'extra-rounded']" :key="type">
+                  <div
+                    class="radio"
+                    v-for="type in ['dot', 'square', 'rounded', 'extra-rounded']"
+                    :key="type"
+                  >
                     <input
                       :id="'cornersSquareOptionsType-' + type"
                       type="radio"
@@ -1868,9 +2701,9 @@ const updateDataFromModal = (newData: string) => {
                     <label :for="'cornersSquareOptionsType-' + type">{{ t(type) }}</label>
                   </div>
                 </fieldset>
-                <fieldset class="flex-1">
+                <fieldset class="flex-1" v-show="isFieldVisible('cornersDotType')">
                   <legend>{{ t('Corners Dot type') }}</legend>
-                  <div class="radio" v-for="type in ['dot', 'square']" :key="type">
+                  <div class="radio" v-for="type in ['dot', 'square', 'rounded']" :key="type">
                     <input
                       :id="'cornersDotOptionsType-' + type"
                       type="radio"
@@ -1880,7 +2713,7 @@ const updateDataFromModal = (newData: string) => {
                     <label :for="'cornersDotOptionsType-' + type">{{ t(type) }}</label>
                   </div>
                 </fieldset>
-                <fieldset class="flex-1">
+                <fieldset class="flex-1" v-show="isFieldVisible('errorCorrectionLevel')">
                   <div class="flex flex-row items-center gap-2">
                     <legend>{{ t('Error correction level') }}</legend>
                     <a
@@ -1925,6 +2758,16 @@ const updateDataFromModal = (newData: string) => {
                       </span>
                     </div>
                   </div>
+                  <p
+                    v-if="isErrorCorrectionBoostedForLogo"
+                    class="ms-1 mt-2 text-xs font-normal text-zinc-500 dark:text-zinc-400"
+                  >
+                    {{
+                      t(
+                        'A logo needs more error correction to stay scannable — using High (25%) instead.'
+                      )
+                    }}
+                  </p>
                 </fieldset>
               </div>
             </section>
@@ -1948,4 +2791,50 @@ const updateDataFromModal = (newData: string) => {
     :image-src="copyModalImageSrc"
     @close="closeCopyModal"
   />
+  <TextExportModal
+    :open="isTextExportModalOpen"
+    :matrix="asciiMatrix"
+    :has-frame="showFrame"
+    :filename="exportFilename"
+    :is-batch="exportMode === ExportMode.Batch"
+    :batch-rows="asciiBatchRows"
+    :ec-level="errorCorrectionLevel"
+    @close="isTextExportModalOpen = false"
+  />
+
+  <QRSimpleFieldsCustomizer
+    v-model="simpleFields"
+    :open="isCustomizeFieldsOpen"
+    :frame-enabled="showFrame"
+    :is-large="isLarge"
+    @update:open="isCustomizeFieldsOpen = $event"
+    @update:frame-enabled="showFrame = $event"
+  />
 </template>
+
+<style scoped>
+/* When switching between Simple and Full mode we briefly add `.mode-animating`
+   to the settings container; every setting block tagged `.field-reveal` that is
+   currently visible then slides + fades into place, so newly-revealed settings
+   animate in instead of popping. */
+@keyframes field-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.mode-animating .field-reveal {
+  animation: field-slide-in 0.28s ease both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-animating .field-reveal {
+    animation: none;
+  }
+}
+</style>
